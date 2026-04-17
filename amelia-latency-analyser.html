@@ -618,6 +618,142 @@ function calculateTimestampDelta(logs) {
 }
 
 // ═══════════════════════════════════════════════
+// AUTO-DISCOVER CALL ID FROM ENGINE LOGS
+// ═══════════════════════════════════════════════
+
+/**
+ * Extract Call IDs (SBC + SIP) from Engine logs for a given Conversation ID.
+ * Looks for the script-logger initAttribs line which contains:
+ *   voice_sbc_call_id:<uuid> and voice_sip_call_id:<uuid>
+ * Also checks the explicit "sbc_call_id-->> <uuid>" log line.
+ * Returns { sbcCallId, sipCallId, source } or null if not found.
+ */
+function discoverCallIdFromEngine(engineLogs) {
+  let sbcCallId = null;
+  let sipCallId = null;
+  let source = null;
+
+  for (const entry of engineLogs) {
+    const msg = entry.msg || '';
+    const raw = entry.raw || '';
+    const full = msg + ' ' + raw;
+
+    // Priority 1: initAttribs line (most complete — has both IDs + all SIP metadata)
+    const sbcMatch = full.match(/voice_sbc_call_id[=:]([a-f0-9-]{8,})/i);
+    const sipMatch = full.match(/voice_sip_call_id[=:]([a-f0-9-]{8,})/i);
+    if (sbcMatch) {
+      sbcCallId = sbcMatch[1];
+      sipCallId = sipMatch ? sipMatch[1] : sipCallId;
+      source = /initAttribs/i.test(full) ? 'initAttribs' : /StartedConversationEvent/i.test(full) ? 'StartedConversationEvent' : 'engine-log';
+      break; // initAttribs is definitive — no need to keep looking
+    }
+
+    // Priority 2: Explicit BPN script log "sbc_call_id-->> <uuid>"
+    if (!sbcCallId) {
+      const explicitMatch = full.match(/sbc_call_id--?>>\s*([a-f0-9-]{8,})/i);
+      if (explicitMatch) {
+        sbcCallId = explicitMatch[1];
+        source = 'script-logger';
+      }
+    }
+    if (!sipCallId) {
+      const sipExplicit = full.match(/voice_sip_call_id--?>>\s*([a-f0-9-]{8,})/i);
+      if (sipExplicit) {
+        sipCallId = sipExplicit[1];
+      }
+    }
+  }
+
+  if (sbcCallId) {
+    return { sbcCallId, sipCallId, source };
+  }
+  return null;
+}
+
+// ═══════════════════════════════════════════════
+// ENGINE LOG SUB-CATEGORY CLASSIFIER
+// Classifies Engine log entries into processing sub-phases
+// ═══════════════════════════════════════════════
+
+const ENGINE_SUB_CATEGORIES = [
+  { key: 'agentic', label: 'Agentic Execution', color: '#818cf8', patterns: [
+    /AgenticPlanning/i, /AgenticExecution/i, /AgenticResponseHandling/i,
+    /AgenticInstructionGeneration/i, /AgenticHandoverExecution/i,
+    /AssignAgent/i, /DetectGoalChange/i, /ClassifyTaskType/i,
+    /HandoverExecution/i, /ResumeRepeatContext/i, /RankRelevantInstructions/i,
+    /PostProcessingWithInstruction/i,
+  ]},
+  { key: 'cognitive', label: 'Cognitive Provider (LLM)', color: '#f97316', patterns: [
+    /CognitiveProvider/i, /AbstractOpenAiClient/i, /OpenAi.*chat/i, /OpenAi.*stream/i,
+    /DefaultChatCompletionService/i, /AbstractAgenticLlmService/i, /Chat completion/i,
+    /LlmMetric/i, /Finished reading from OpenAi/i,
+  ]},
+  { key: 'engagement', label: 'User Engagement / Filler', color: '#a78bfa', patterns: [
+    /UserEngagementMessage/i, /GenerateFiller/i, /GenerateProgressUpdate/i,
+    /DefaultUserEngagementMessageService/i,
+  ]},
+  { key: 'dialog', label: 'Dialog / BPN Execution', color: '#fb923c', patterns: [
+    /BpnProcess/i, /BpnTask/i, /BpnEngine/i, /BpnScript/i, /DefaultBpnProcessEngine/i,
+    /DeterministicTask/i, /BpnScriptTaskExecutor/i, /BpnVariableStore/i,
+    /BpnVertexContext/i, /BpnExecutionEvent/i, /script-logger/i,
+    /GroovyClosureProcessor/i, /JexlExpressionLanguageEngine/i,
+  ]},
+  { key: 'dialog_state', label: 'Dialog State / Context', color: '#22d3ee', patterns: [
+    /DialogStateTracker/i, /ContextDialog/i, /ConversationContext/i,
+    /InboundConversationMessage/i, /OutboundTextMessage/i, /MessageRewriter/i,
+    /speechMessageText/i, /ConversationState/i,
+  ]},
+  { key: 'user_mgmt', label: 'User / Session Mgmt', color: '#34d399', patterns: [
+    /UserManagerGrpcImpl/i, /SessionManager/i, /initAttribs/i, /StartedConversation/i,
+    /DefaultLoggingService/i, /ExecutionTimeLogger/i,
+  ]},
+  { key: 'api_svc', label: 'API / Integration Calls', color: '#f59e0b', patterns: [
+    /ApiTask/i, /RestTemplate/i, /HttpClient/i, /AmeliaIntegrationClientGatewayImpl/i,
+    /Submitting requestId/i, /Returned requestId/i, /connector.*call/i,
+  ]},
+  { key: 'nlu', label: 'NLU / Classification', color: '#60a5fa', patterns: [
+    /ClassificationEngine/i, /intent.*classif/i, /NluService/i, /NluProcessor/i,
+    /IntentResolver/i, /EntityExtract/i, /RegexGazetteer/i,
+  ]},
+  { key: 'other', label: 'Other Processing', color: '#94a3b8', patterns: [] },
+];
+
+function classifyEngineLogSubCategory(entry) {
+  const msg = entry.msg || '';
+  const raw = entry.raw || '';
+  const full = msg + ' ' + raw;
+  for (const cat of ENGINE_SUB_CATEGORIES) {
+    if (cat.key === 'other') continue;
+    for (const pat of cat.patterns) {
+      if (pat.test(full)) return cat.key;
+    }
+  }
+  return 'other';
+}
+
+/**
+ * Build sub-category breakdown from Engine log entries within a turn.
+ * Returns array of { key, label, color, count, entries, spanMs }
+ */
+function buildEngineSubBreakdown(engineLogEntries) {
+  if (!engineLogEntries || engineLogEntries.length === 0) return [];
+  const groups = {};
+  ENGINE_SUB_CATEGORIES.forEach(c => { groups[c.key] = []; });
+  engineLogEntries.forEach(e => {
+    const cat = classifyEngineLogSubCategory(e);
+    groups[cat].push(e);
+  });
+  return ENGINE_SUB_CATEGORIES.map(c => {
+    const entries = groups[c.key];
+    if (entries.length === 0) return null;
+    // Compute time span from first to last entry in this sub-category
+    const times = entries.map(e => e.ts ? new Date(e.ts).getTime() : NaN).filter(t => !isNaN(t)).sort((a, b) => a - b);
+    const spanMs = times.length >= 2 ? times[times.length - 1] - times[0] : 0;
+    return { ...c, count: entries.length, entries, spanMs };
+  }).filter(Boolean);
+}
+
+// ═══════════════════════════════════════════════
 // SUBMIT/RETURN PAIR LATENCY (Engine API calls)
 // ═══════════════════════════════════════════════
 
@@ -662,9 +798,20 @@ function computeSubmitReturnLatencies(engineLogs) {
 // Correlates EVG + Engine logs by timestamp to build per-turn segment breakdown
 // ═══════════════════════════════════════════════
 
-function buildConversationFlow(evgLogs, engineLogs, apiPairLatencies) {
+function buildConversationFlow(evgLogs, engineLogs, apiPairLatencies, allEngineLogs) {
   const sorted = [...evgLogs].sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
   const toMs = (s) => s ? new Date(s).getTime() : NaN;
+
+  // ── Pre-compute timestamps once for engine logs to avoid repeated Date construction ──
+  // Use ALL engine logs (not just conversation-filtered) for per-turn time-window correlation.
+  // CognitiveProvider/LLM entries often don't contain the Conversation ID text, so they get
+  // dropped by conversation-ID filtering. The per-turn time window does the real filtering.
+  const engineSource = allEngineLogs && allEngineLogs.length > 0 ? allEngineLogs : (engineLogs || []);
+  const engineWithTime = engineSource.map(e => ({ entry: e, time: e.ts ? new Date(e.ts).getTime() : NaN })).filter(e => !isNaN(e.time));
+  engineWithTime.sort((a, b) => a.time - b.time);
+
+  // Pre-compute timestamps for API pair latencies
+  const apiPairsWithTime = (apiPairLatencies || []).map(p => ({ ...p, submitTime: new Date(p.submitTs).getTime() }));
 
   // ── Collect boundary events ──
   const sayExecs = [];       // TaskSay:exec — Amelia starts speaking
@@ -680,11 +827,16 @@ function buildConversationFlow(evgLogs, engineLogs, apiPairLatencies) {
   const webhookSuccesses = []; // webhook round-trip
   const ameliaTexts = [];    // AM5 text lines — what Amelia says
 
+  // Pre-compute timestamps on all EVG entries to avoid repeated Date construction in per-turn filters
+  for (const e of sorted) {
+    if (e.ts) { e._timeMs = toMs(e.ts); } else { e._timeMs = NaN; }
+  }
+
   for (const e of sorted) {
     const msg = e.msg || '';
     const t = e.ts;
     if (!t) continue;
-    const time = toMs(t);
+    const time = e._timeMs;
     if (isNaN(time)) continue;
 
     if (/TaskSay[:\s]exec\b/i.test(msg) && !/play result/i.test(msg)) {
@@ -761,13 +913,6 @@ function buildConversationFlow(evgLogs, engineLogs, apiPairLatencies) {
       t.time >= (firstSay?.time || 0) - 200 && t.time <= (firstPlayback?.time || resolve.time) + 500
     );
 
-    // Amelia's text
-    let ameliaText = '';
-    if (firstSay) {
-      const nearbyText = ameliaTexts.find(t => Math.abs(t.time - firstSay.time) < 500);
-      ameliaText = nearbyText?.text || '';
-    }
-
     // ── USER SPEAKING / STT SUB-PHASES ──
     const lastTranscript = finalTranscripts.filter(f => f.time <= resolve.time && f.time > prevResolveTime).pop();
 
@@ -791,6 +936,20 @@ function buildConversationFlow(evgLogs, engineLogs, apiPairLatencies) {
     const webhook = webhookSuccesses.find(w => w.time >= resolve.time - 50 && w.time <= resolve.time + 200);
     const nextSayExec = sayExecs.find(s => s.time > resolve.time && s.time < nextResolveTime);
 
+    // Amelia's RESPONSE text — what Amelia says AFTER processing the user's input
+    // This is the Amelia utterance that comes after resolve (not the greeting before the user spoke)
+    let ameliaText = '';
+    const responseAmeliaTexts = ameliaTexts.filter(t => t.time > resolve.time && t.time < nextResolveTime);
+    if (responseAmeliaTexts.length > 0) {
+      ameliaText = responseAmeliaTexts.map(t => t.text).join(' ');
+    } else {
+      // Fallback: look for the next Say:exec after resolve and find nearby ameliaText
+      if (nextSayExec) {
+        const nearbyText = ameliaTexts.find(t => Math.abs(t.time - nextSayExec.time) < 1000 && t.time > resolve.time);
+        ameliaText = nearbyText?.text || '';
+      }
+    }
+
     // ── COMPUTE LATENCIES ──
     const ttsLatencyMs = ttsRtt?.rttMs || (firstSay && firstPlayback ? firstPlayback.time - firstSay.time : null);
     const ameliaDuration = firstSay && (lastSayComplete || gatherExec)
@@ -806,62 +965,130 @@ function buildConversationFlow(evgLogs, engineLogs, apiPairLatencies) {
     let llmCalls = [];
     let engineLogEntries = [];
     if (engineMs && engineEndTime) {
-      const eStart = engineStartTime - 500;
-      const eEnd = engineEndTime + 500;
-      apiCalls = (apiPairLatencies || []).filter(p => {
-        const st = new Date(p.submitTs).getTime();
-        return st >= eStart && st <= eEnd;
-      });
-      engineLogEntries = (engineLogs || []).filter(e => {
-        if (!e.ts) return false;
-        const t = new Date(e.ts).getTime();
-        return t >= eStart && t <= eEnd;
-      });
+      // Widen the window: LLM calls (esp. User-Engagement-Message-Generator, agentic-execution)
+      // can start before the webhook and finish after next Say. Use generous ±2s buffer.
+      const eStart = engineStartTime - 2000;
+      const eEnd = engineEndTime + 2000;
+      apiCalls = apiPairsWithTime.filter(p => p.submitTime >= eStart && p.submitTime <= eEnd);
+      // Use pre-computed timestamps — scan sorted array with early termination
+      engineLogEntries = [];
+      for (let ei = 0; ei < engineWithTime.length; ei++) {
+        const et = engineWithTime[ei];
+        if (et.time < eStart) continue;  // not yet in window
+        if (et.time > eEnd) break;       // past window, sorted so done
+        engineLogEntries.push(et.entry);
+      }
 
       // ── Extract LLM call latencies from Engine logs in this turn ──
-      // Look for patterns: "Chat completion call in X s", "elapsedTime=X", OpenAi chat/stream latencies
+      // Priority 1: "Finished reading from OpenAi stream for task [TaskType] in X ms"
+      // Priority 1b: "Completed 'OpenAi chat complete stream' after N retries in Xms, task: TaskType"
+      // Priority 2: "Chat completion call in X s/ms" with nearby "task Type" context
+      // Priority 3: "Cognitive provider call for task Type X ... elapsedTime=Y"
+      // Priority 4: "DefaultChatCompletionService ... took Nms"
+      // Each LLM call produces multiple log entries (e.g., "Finished reading" + "Cognitive provider call" + "Chat completion call"
+      // for the same task type at nearly the same timestamp). We need to deduplicate by task type to avoid double-counting.
+      // Strategy: first pass collects all candidates; second pass deduplicates by task type, preferring higher-priority patterns.
+      const llmCandidates = []; // { priority, latencyMs, taskType, model, ts, detail, logTs }
       engineLogEntries.forEach(log => {
         const m = log.msg || '';
         const raw = log.raw || '';
         const full = m + ' ' + raw;
-        // "Chat completion call in 1.234 s" or "Chat completion call in 1234ms"
-        let llmMatch = full.match(/Chat completion call in\s+(\d+(?:\.\d+)?)\s+(s|ms)\b/i);
-        if (llmMatch) {
-          const val = parseFloat(llmMatch[1]);
-          const ms = llmMatch[2] === 's' ? Math.round(val * 1000) : Math.round(val);
-          const modelMatch = full.match(/model[=:]\s*(\S+)/i);
-          llmCalls.push({ latencyMs: ms, model: modelMatch?.[1] || 'unknown', ts: log.ts, detail: 'Chat completion' });
+
+        // P1: "Finished reading from OpenAi stream for task AgenticExecution:HandoverExecution in 388.1 ms, packets=..."
+        const streamMatch = full.match(/Finished reading from OpenAi stream for task\s+(?:\[?)(\S+?)(?:\]?)\s+in\s+(\d+(?:\.\d+)?)\s*(ms|s)\b/i);
+        if (streamMatch) {
+          const taskType = streamMatch[1];
+          const val = parseFloat(streamMatch[2]);
+          const ms = streamMatch[3] === 's' ? Math.round(val * 1000) : Math.round(val);
+          llmCandidates.push({ priority: 1, latencyMs: ms, taskType, model: 'OpenAI', ts: log.ts, detail: 'Stream completion' });
           return;
         }
-        // "elapsedTime=947" in LlmMetrics / CognitiveProvider context
+
+        // P1b: "Completed 'OpenAi chat complete stream' after 2 retries in 2136ms, task: UserEngagementMessage:GenerateFillerMessage"
+        const completedMatch = full.match(/Completed\s+'OpenAi chat complete stream'\s+after\s+\d+\s+retries?\s+in\s+(\d+)\s*ms,\s*task:\s*(\S+)/i);
+        if (completedMatch) {
+          const ms = parseInt(completedMatch[1]);
+          const taskType = completedMatch[2].replace(/[",]+$/, ''); // strip trailing quotes/commas
+          llmCandidates.push({ priority: 1, latencyMs: ms, taskType, model: 'OpenAI', ts: log.ts, detail: 'Retry completion' });
+          return;
+        }
+
+        // P2: "Chat completion call in 2.437 s" or "Chat completion call in 843.6 ms"
+        const chatMatch = full.match(/Chat completion call in\s+(\d+(?:\.\d+)?)\s+(s|ms)\b/i);
+        if (chatMatch) {
+          const val = parseFloat(chatMatch[1]);
+          const ms = chatMatch[2] === 's' ? Math.round(val * 1000) : Math.round(val);
+          const taskTypeMatch = full.match(/task\s+(?:Type\s+)?(\w+:\w+)/i);
+          const taskType = taskTypeMatch ? taskTypeMatch[1] : null;
+          llmCandidates.push({ priority: 2, latencyMs: ms, taskType: taskType || 'ChatCompletion', model: 'OpenAI', ts: log.ts, detail: 'Chat completion' });
+          return;
+        }
+
+        // P3: "Cognitive provider call for task Type X ... elapsedTime=947"
         if (/(?:LlmMetric|CognitiveProvider|ChatCompletion|OpenAi)/i.test(full)) {
           const elapsed = full.match(/elapsedTime[=:]\s*(\d+)/i);
           if (elapsed) {
-            const modelMatch = full.match(/model[=:]\s*(\S+)/i);
-            llmCalls.push({ latencyMs: parseInt(elapsed[1]), model: modelMatch?.[1] || 'unknown', ts: log.ts, detail: 'LLM elapsed' });
+            const taskTypeMatch = full.match(/task\s+(?:Type\s+)?(\w+:\w+)/i);
+            llmCandidates.push({ priority: 3, latencyMs: parseInt(elapsed[1]), taskType: taskTypeMatch?.[1] || 'CognitiveProvider', model: 'OpenAI', ts: log.ts, detail: 'Elapsed time' });
             return;
           }
         }
-        // "DefaultChatCompletionService ... took Nms" or "completed in Nms"
+
+        // P4: "DefaultChatCompletionService ... took Nms" or "completed in Nms"
         if (/DefaultChatCompletionService|AbstractAgenticLlmService/i.test(full)) {
           const tookMatch = full.match(/(?:took|completed in|finished in)\s+(\d+)\s*ms/i);
           if (tookMatch) {
-            llmCalls.push({ latencyMs: parseInt(tookMatch[1]), model: 'LLM', ts: log.ts, detail: 'ChatCompletion service' });
+            const taskTypeMatch = full.match(/task\s+(?:Type\s+)?(\w+:\w+)/i);
+            llmCandidates.push({ priority: 4, latencyMs: parseInt(tookMatch[1]), taskType: taskTypeMatch?.[1] || 'ChatCompletion', model: 'LLM', ts: log.ts, detail: 'ChatCompletion service' });
           }
         }
       });
+
+      // Deduplicate LLM candidates by task type — same LLM call fires multiple log entries
+      // (e.g., "Finished reading" + "Cognitive provider call" + "Chat completion call").
+      // Keep only the highest-priority (lowest number) entry per task type.
+      // BUT: allow same task type to appear multiple times if timestamps are far apart (>500ms = different invocation).
+      llmCandidates.sort((a, b) => a.priority - b.priority || (a.ts || '').localeCompare(b.ts || ''));
+      const llmDeduped = [];
+      const seenTasks = []; // { taskType, tsMs }
+      for (const c of llmCandidates) {
+        const cMs = c.ts ? new Date(c.ts).getTime() : 0;
+        const isDupe = seenTasks.some(s => s.taskType === c.taskType && Math.abs(cMs - s.tsMs) < 500);
+        if (!isDupe) {
+          seenTasks.push({ taskType: c.taskType, tsMs: cMs });
+          llmDeduped.push({ latencyMs: c.latencyMs, taskType: c.taskType, model: c.model, ts: c.ts, detail: c.detail });
+        }
+      }
+      llmCalls = llmDeduped;
     }
 
     // Compute LLM total for this turn
     const llmTotalMs = llmCalls.reduce((s, l) => s + l.latencyMs, 0);
     const engineNonLlmMs = engineMs ? Math.max(0, engineMs - llmTotalMs) : null;
 
-    // Collect EVG logs for this turn
+    // ── RESPONSE TTS ── (TTS synthesis for Amelia's RESPONSE to this turn, not the previous utterance)
+    const responseTtsRtt = ttsRtts.find(t => t.time > resolve.time && t.time < nextResolveTime);
+    const responseTtsMs = responseTtsRtt?.rttMs || 0;
+
+    // ── 6-BUCKET BREAKDOWN ──
+    // Total turn latency = User finishes speaking → Amelia responds
+    //   = ASR finalization (final transcript → resolve) + system wait (resolve → next Say)
+    // Buckets: STT | TTS | EVG | LLM | API | Engine (other)
+    const b_stt = Math.max(0, asrFinalizationMs || 0);       // 1. STT: ASR finalization timer
+    const b_tts = Math.max(0, responseTtsMs);                 // 2. TTS: response synthesis
+    const b_evg = Math.max(0, webhook?.webhookMs || 0);       // 3. EVG: webhook round-trip
+    const b_llm = Math.max(0, llmTotalMs || 0);               // 4. LLM: all LLM calls
+    const b_api = Math.max(0, (apiCalls || []).reduce((s, a) => s + a.latencyMs, 0)); // 5. API calls
+    const rawSystemMs = systemMs ? Math.round(systemMs) : 0;
+    const totalTurnMs = b_stt + rawSystemMs;                   // Full user-perceived delay
+    const b_engine = Math.max(0, totalTurnMs - b_stt - b_tts - b_evg - b_llm - b_api); // 6. Engine (residual)
+
+    // Collect EVG logs for this turn (use pre-computed times from sorted boundary events)
     const turnStartTime = firstSay?.time || prevResolveTime;
     const turnEndTime = nextSayExec?.time || resolve.time + (engineMs || 0);
     const evgTurnLogs = sorted.filter(e => {
       if (!e.ts) return false;
-      const t = toMs(e.ts);
+      const t = e._timeMs !== undefined ? e._timeMs : toMs(e.ts);
       return t >= turnStartTime && t <= turnEndTime;
     });
 
@@ -869,61 +1096,57 @@ function buildConversationFlow(evgLogs, engineLogs, apiPairLatencies) {
       turnNumber: gi + 1,
       userText: resolve.userText || lastTranscript?.text || '(speech)',
       ameliaText,
-      // Segments
-      ameliaSpeakStartTs: firstSay?.ts || null,
-      ameliaSpeakEndTs: lastSayComplete?.ts || gatherExec?.ts || null,
-      ttsLatencyMs,
-      ameliaDurationMs: ameliaDuration ? Math.round(ameliaDuration) : null,
-      gatherStartTs: gatherExec?.ts || null,
       gatherResolveTs: resolve.ts,
-      userDurationMs: userDuration ? Math.round(userDuration) : null,
-      // STT sub-phases
-      sttActivationMs,
-      speechDetectionMs,
-      sttRecognitionMs,
-      asrFinalizationMs,
-      asrTimerValueMs,
-      sttStartTranscribingTs: turnStartTranscribing?.ts || null,
-      firstTranscriptionTs: firstTranscription?.ts || null,
-      lastFinalTranscriptionTs: lastFinalTranscription?.ts || null,
-      // Engine phases
-      webhookMs: webhook?.webhookMs || null,
       engineStartTs: webhook?.ts || resolve.ts,
       engineEndTs: nextSayExec?.ts || null,
-      engineProcessingMs: engineMs ? Math.round(engineMs) : null,
-      // LLM calls within Engine
+      lastFinalTranscriptionTs: lastFinalTranscription?.ts || null,
+      // ── 6 Buckets (these sum to totalTurnMs) ──
+      b_stt, b_tts, b_evg, b_llm, b_api, b_engine,
+      totalTurnMs,
+      // Detail data for drill-down
       llmCalls,
-      llmTotalMs,
-      engineNonLlmMs: engineNonLlmMs !== null ? Math.round(engineNonLlmMs) : null,
       apiCalls,
+      asrTimerValueMs,
+      responseTtsMs,
+      // Engine sub-breakdown (for expandable Amelia Processing detail)
+      engineSubBreakdown: buildEngineSubBreakdown(engineLogEntries),
+      // Raw data for logs
       engineLogCount: engineLogEntries.length,
       engineLogEntries,
-      systemLatencyMs: systemMs ? Math.round(systemMs) : null,
       evgLogCount: evgTurnLogs.length,
       evgTurnLogs,
+      // Keep for LLM payload / backward compat
+      systemLatencyMs: rawSystemMs,
+      engineProcessingMs: engineMs ? Math.round(engineMs) : null,
+      llmTotalMs,
+      engineNonLlmMs: engineNonLlmMs !== null ? Math.round(engineNonLlmMs) : null,
+      webhookMs: webhook?.webhookMs || null,
+      ttsLatencyMs: responseTtsMs,
+      sttActivationMs, speechDetectionMs, sttRecognitionMs, asrFinalizationMs,
     });
   }
 
-  // ── Flow stats ──
-  const systemLats = turns.map(t => t.systemLatencyMs).filter(v => v !== null && v > 0);
-  const engineLats = turns.map(t => t.engineProcessingMs).filter(v => v !== null && v > 0);
-  const ttsLats = turns.map(t => t.ttsLatencyMs).filter(v => v !== null && v > 0);
-  const llmLats = turns.map(t => t.llmTotalMs).filter(v => v !== null && v > 0);
-  const sortedSys = [...systemLats].sort((a, b) => a - b);
+  // ── Flow stats (based on totalTurnMs — the user-perceived delay) ──
+  const turnLats = turns.map(t => t.totalTurnMs).filter(v => v > 0);
+  const llmLats = turns.map(t => t.b_llm).filter(v => v > 0);
+  const ttsLats = turns.map(t => t.b_tts).filter(v => v > 0);
+  const sttLats = turns.map(t => t.b_stt).filter(v => v > 0);
+  const sortedTurn = [...turnLats].sort((a, b) => a - b);
 
   const stats = {
     turnCount: turns.length,
-    systemAvgMs: systemLats.length > 0 ? Math.round(systemLats.reduce((s,v) => s+v, 0) / systemLats.length) : 0,
-    systemMedianMs: sortedSys.length > 0 ? Math.round(sortedSys[Math.floor(sortedSys.length / 2)]) : 0,
-    systemWorstMs: systemLats.length > 0 ? Math.round(Math.max(...systemLats)) : 0,
-    systemBestMs: systemLats.length > 0 ? Math.round(Math.min(...systemLats)) : 0,
-    systemP95Ms: sortedSys.length >= 2 ? Math.round(sortedSys[Math.floor(sortedSys.length * 0.95)]) : (sortedSys[0] || 0),
-    systemWorstTurn: systemLats.length > 0 ? turns.find(t => t.systemLatencyMs === Math.max(...systemLats))?.turnNumber : null,
-    engineAvgMs: engineLats.length > 0 ? Math.round(engineLats.reduce((s,v) => s+v, 0) / engineLats.length) : 0,
+    systemAvgMs: turnLats.length > 0 ? Math.round(turnLats.reduce((s,v) => s+v, 0) / turnLats.length) : 0,
+    systemMedianMs: sortedTurn.length > 0 ? Math.round(sortedTurn[Math.floor(sortedTurn.length / 2)]) : 0,
+    systemWorstMs: turnLats.length > 0 ? Math.round(Math.max(...turnLats)) : 0,
+    systemBestMs: turnLats.length > 0 ? Math.round(Math.min(...turnLats)) : 0,
+    systemP95Ms: sortedTurn.length >= 2 ? Math.round(sortedTurn[Math.floor(sortedTurn.length * 0.95)]) : (sortedTurn[0] || 0),
+    systemWorstTurn: turnLats.length > 0 ? turns.find(t => t.totalTurnMs === Math.max(...turnLats))?.turnNumber : null,
+    engineAvgMs: turns.length > 0 ? Math.round(turns.map(t => t.b_engine).reduce((s,v) => s+v, 0) / turns.length) : 0,
     ttsAvgMs: ttsLats.length > 0 ? Math.round(ttsLats.reduce((s,v) => s+v, 0) / ttsLats.length) : 0,
     llmAvgMs: llmLats.length > 0 ? Math.round(llmLats.reduce((s,v) => s+v, 0) / llmLats.length) : 0,
+    sttAvgMs: sttLats.length > 0 ? Math.round(sttLats.reduce((s,v) => s+v, 0) / sttLats.length) : 0,
     totalConversationMs: turns.length > 0
-      ? toMs(turns[turns.length - 1].gatherResolveTs || '') - toMs(turns[0].ameliaSpeakStartTs || '')
+      ? toMs(turns[turns.length - 1].gatherResolveTs || '') - toMs(turns[0].gatherResolveTs || '')
       : 0,
   };
 
@@ -951,21 +1174,15 @@ function buildLLMPayload(filteredLogs, stageLatencies, conversationId, turnData)
   let turnSummary = '';
   if (turnData && turnData.turns && turnData.turns.length > 0) {
     const s = turnData.stats;
-    turnSummary = '\n\nCONVERSATION FLOW (Turn-by-Turn, full call cycle: Amelia→TTS→User→STT→Engine→Integrations→Amelia):\n';
-    turnSummary += `Turns: ${s.turnCount} | System Latency: avg ${s.systemAvgMs}ms, worst ${s.systemWorstMs}ms (Turn ${s.systemWorstTurn}), best ${s.systemBestMs}ms, P95 ${s.systemP95Ms}ms\n`;
-    turnSummary += `Engine Processing avg: ${s.engineAvgMs}ms | LLM avg: ${s.llmAvgMs}ms | TTS avg: ${s.ttsAvgMs}ms | Conversation Duration: ${(s.totalConversationMs / 1000).toFixed(1)}s\n\n`;
+    turnSummary = '\n\nCONVERSATION FLOW (Turn-by-Turn — User Speaks → Amelia Responds):\n';
+    turnSummary += `Turns: ${s.turnCount} | Turn Latency: avg ${s.systemAvgMs}ms, worst ${s.systemWorstMs}ms (Turn ${s.systemWorstTurn}), best ${s.systemBestMs}ms, P95 ${s.systemP95Ms}ms\n`;
+    turnSummary += `Avg breakdown: STT ${s.sttAvgMs}ms | TTS ${s.ttsAvgMs}ms | LLM ${s.llmAvgMs}ms | Engine ${s.engineAvgMs}ms\n\n`;
     turnData.turns.forEach(t => {
       const isWorst = t.turnNumber === s.systemWorstTurn;
-      const flag = isWorst ? ' [SLOWEST TURN]' : t.systemLatencyMs > s.systemAvgMs * 2 ? ' [SLOW]' : '';
+      const flag = isWorst ? ' [SLOWEST TURN]' : t.totalTurnMs > s.systemAvgMs * 2 ? ' [SLOW]' : '';
+      const llmDetail = (t.llmCalls || []).map(l => `${l.taskType || l.model}=${Math.round(l.latencyMs)}ms`).join(', ');
       const apiDetail = (t.apiCalls || []).map(a => `${a.service}=${Math.round(a.latencyMs)}ms`).join(', ');
-      const llmDetail = (t.llmCalls || []).map(l => `${l.model}=${Math.round(l.latencyMs)}ms`).join(', ');
-      const sttDetail = [
-        t.sttActivationMs !== null ? `sttInit=${t.sttActivationMs}ms` : null,
-        t.speechDetectionMs !== null ? `speechWait=${t.speechDetectionMs}ms` : null,
-        t.sttRecognitionMs !== null ? `sttRecog=${t.sttRecognitionMs}ms` : null,
-        t.asrFinalizationMs !== null ? `asrTimer=${t.asrFinalizationMs}ms` : null,
-      ].filter(Boolean).join(', ');
-      turnSummary += `Turn ${t.turnNumber}${flag}: System=${t.systemLatencyMs || '?'}ms | TTS=${t.ttsLatencyMs || '?'}ms | STT[${sttDetail || 'N/A'}] | Engine=${t.engineProcessingMs || '?'}ms (nonLLM=${t.engineNonLlmMs || '?'}ms)${llmDetail ? ' LLM[' + llmDetail + ']' : ''}${apiDetail ? ' API[' + apiDetail + ']' : ''} | User: "${(t.userText || '').substring(0, 50)}" → Amelia: "${(t.ameliaText || '').substring(0, 50)}"\n`;
+      turnSummary += `Turn ${t.turnNumber}${flag}: Total=${t.totalTurnMs}ms [STT=${t.b_stt}ms TTS=${t.b_tts}ms EVG=${t.b_evg}ms LLM=${t.b_llm}ms API=${t.b_api}ms Engine=${t.b_engine}ms]${llmDetail ? ' LLM[' + llmDetail + ']' : ''}${apiDetail ? ' API[' + apiDetail + ']' : ''} | User: "${(t.userText || '').substring(0, 50)}" → Amelia: "${(t.ameliaText || '').substring(0, 50)}"\n`;
     });
   }
 
@@ -983,7 +1200,7 @@ async function analyzeWithOpenAI(config, compactPayload) {
 - **TTS**: Text-to-speech synthesis time
 - **STT sub-phases**: STT Activation (Gather:exec → startTranscribing), Speech Detection (waiting for user voice), STT Recognition (partial→final transcript), ASR Finalization (timer wait, typically 2000ms)
 - **Engine (non-LLM)**: NLU, Dialog/BPN execution, routing — everything except LLM calls
-- **LLM Calls**: Individual LLM/ChatCompletion latencies with model names
+- **LLM Calls**: Individual CognitiveProvider calls with task types (e.g., AgenticPlanning:AssignAgent, AgenticExecution:HandoverExecution, AgenticResponseHandling:ClassifyTaskType, UserEngagementMessage:GenerateFillerMessage)
 - **API Calls**: External integration calls (Submit→Return pairs)
 
 The "System Latency" is what the user perceives as delay — from when they finish speaking to when Amelia starts responding. This includes Engine processing (LLM + non-LLM), webhook round-trip, and TTS synthesis for the response.
@@ -1141,21 +1358,67 @@ function ProcessingPipeline({ steps }) {
   );
 }
 
+function ConversationTranscript({ flow }) {
+  if (!flow || !flow.turns || flow.turns.length === 0) return null;
+  const { turns } = flow;
+  return (
+    <div className="card">
+      <div className="card-header">
+        <div className="card-title">Conversation Transcript</div>
+        <span style={{fontSize:12,color:'var(--text-muted)'}}>{turns.length} turns — full dialog between User and Amelia</span>
+      </div>
+      <div className="card-body" style={{maxHeight:400,overflow:'auto'}}>
+        <div style={{display:'flex',flexDirection:'column',gap:8,fontSize:12,lineHeight:1.6}}>
+          {turns.map((t, i) => (
+            <React.Fragment key={i}>
+              {t.ameliaText && (
+                <div style={{display:'flex',gap:10,alignItems:'flex-start'}}>
+                  <div style={{minWidth:60,textAlign:'right',fontSize:10,color:'var(--text-muted)',paddingTop:3}}>
+                    {t.engineEndTs?.substring(11,19) || ''}
+                  </div>
+                  <div style={{background:'rgba(139,92,246,0.1)',border:'1px solid rgba(139,92,246,0.2)',borderRadius:8,padding:'6px 12px',maxWidth:'75%'}}>
+                    <div style={{fontSize:10,fontWeight:600,color:'var(--accent-purple)',marginBottom:2}}>Amelia</div>
+                    <div style={{color:'var(--text-primary)'}}>{t.ameliaText}</div>
+                  </div>
+                </div>
+              )}
+              <div style={{display:'flex',gap:10,alignItems:'flex-start',flexDirection:'row-reverse'}}>
+                <div style={{minWidth:60,textAlign:'left',fontSize:10,color:'var(--text-muted)',paddingTop:3}}>
+                  {t.gatherResolveTs?.substring(11,19) || ''}
+                </div>
+                <div style={{background:'rgba(59,130,246,0.1)',border:'1px solid rgba(59,130,246,0.2)',borderRadius:8,padding:'6px 12px',maxWidth:'75%'}}>
+                  <div style={{fontSize:10,fontWeight:600,color:'var(--accent-blue)',marginBottom:2}}>User</div>
+                  <div style={{color:'var(--text-primary)'}}>{t.userText || '(speech)'}</div>
+                </div>
+              </div>
+              {i < turns.length - 1 && t.totalTurnMs > 0 && (
+                <div style={{textAlign:'center',fontSize:10,color:'var(--text-muted)',opacity:0.6}}>
+                  ↓ {t.totalTurnMs}ms response time
+                </div>
+              )}
+            </React.Fragment>
+          ))}
+          {/* Show final Amelia response if last turn has engine end */}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ConversationFlowTimeline({ flow, expandedTurn, onToggleTurn }) {
   if (!flow || !flow.turns || flow.turns.length === 0) return <div style={{color:'var(--text-muted)',padding:'16px 0',fontSize:13}}>No conversation turns detected</div>;
   const { turns, stats } = flow;
   const maxMs = stats.systemWorstMs || 1;
+  const [expandedEngine, setExpandedEngine] = useState(null); // track which turn's engine sub-breakdown is open
 
-  // Segment colors
-  const SEG_COLORS = {
-    tts: { bg: '#8b5cf6', label: 'TTS' },
-    sttActivation: { bg: '#06b6d4', label: 'STT Init' },
-    speechDetect: { bg: '#6b7280', label: 'Speech Wait' },
-    sttRecognition: { bg: '#14b8a6', label: 'STT Recog' },
-    asrFinal: { bg: '#64748b', label: 'ASR Timer' },
+  // 6-bucket colors
+  const B = {
+    stt:    { bg: '#06b6d4', label: 'STT' },
+    tts:    { bg: '#8b5cf6', label: 'TTS' },
+    evg:    { bg: '#64748b', label: 'EVG' },
+    llm:    { bg: '#f97316', label: 'LLM' },
+    api:    { bg: '#f59e0b', label: 'API' },
     engine: { bg: '#ef4444', label: 'Engine' },
-    llm: { bg: '#f97316', label: 'LLM' },
-    api: { bg: '#f59e0b', label: 'API' },
   };
 
   return (
@@ -1163,21 +1426,20 @@ function ConversationFlowTimeline({ flow, expandedTurn, onToggleTurn }) {
       {turns.map((t, i) => {
         const isWorst = t.turnNumber === stats.systemWorstTurn;
         const isExp = expandedTurn === i;
-        const sysMs = t.systemLatencyMs || 0;
-        const sysPct = (sysMs / maxMs) * 100;
-        const status = isWorst ? 'critical' : sysMs > stats.systemAvgMs * 1.5 ? 'warning' : 'normal';
+        const totalMs = t.totalTurnMs || 0;
+        const barPct = (totalMs / maxMs) * 100;
+        const status = isWorst ? 'critical' : totalMs > stats.systemAvgMs * 1.5 ? 'warning' : 'normal';
 
-        // Build segment bar proportions within the system latency
-        const segments = [];
-        if (t.ttsLatencyMs && sysMs > 0) segments.push({ key: 'tts', ms: t.ttsLatencyMs, pct: (t.ttsLatencyMs / sysMs) * 100 });
-        // Engine: split into Engine (non-LLM, non-API), LLM, and API
-        const enginePart = t.engineProcessingMs || 0;
-        const apiTotal = (t.apiCalls || []).reduce((s, a) => s + a.latencyMs, 0);
-        const llmTotal = t.llmTotalMs || 0;
-        const enginePure = Math.max(0, enginePart - apiTotal - llmTotal);
-        if (enginePure > 0 && sysMs > 0) segments.push({ key: 'engine', ms: enginePure, pct: (enginePure / sysMs) * 100 });
-        if (llmTotal > 0 && sysMs > 0) segments.push({ key: 'llm', ms: llmTotal, pct: (llmTotal / sysMs) * 100 });
-        if (apiTotal > 0 && sysMs > 0) segments.push({ key: 'api', ms: apiTotal, pct: (apiTotal / sysMs) * 100 });
+        // Build 6-bucket segment bar
+        const buckets = [
+          { key: 'stt',    ms: t.b_stt },
+          { key: 'tts',    ms: t.b_tts },
+          { key: 'evg',    ms: t.b_evg },
+          { key: 'llm',    ms: t.b_llm },
+          { key: 'api',    ms: t.b_api },
+          { key: 'engine', ms: t.b_engine },
+        ].filter(b => b.ms > 0);
+        const segments = buckets.map(b => ({ ...b, pct: totalMs > 0 ? (b.ms / totalMs) * 100 : 0 }));
 
         const userLabel = t.userText ? `"${t.userText.substring(0, 35)}${t.userText.length > 35 ? '...' : ''}"` : `Turn ${t.turnNumber}`;
 
@@ -1190,21 +1452,21 @@ function ConversationFlowTimeline({ flow, expandedTurn, onToggleTurn }) {
                   <span style={{fontSize:12}}>{userLabel}</span>
                 </div>
                 <div className="waterfall-bar-container">
-                  <div style={{display:'flex',width:`${Math.max(sysPct,12)}%`,height:22,borderRadius:4,overflow:'hidden',border:isWorst?'2px solid var(--accent-red)':'1px solid rgba(255,255,255,0.1)'}}>
+                  <div style={{display:'flex',width:`${Math.max(barPct,12)}%`,height:22,borderRadius:4,overflow:'hidden',border:isWorst?'2px solid var(--accent-red)':'1px solid rgba(255,255,255,0.1)'}}>
                     {segments.map((seg, si) => (
-                      <div key={si} title={`${SEG_COLORS[seg.key].label}: ${Math.round(seg.ms)}ms`}
-                        style={{width:`${Math.max(seg.pct,5)}%`,background:SEG_COLORS[seg.key].bg,display:'flex',alignItems:'center',justifyContent:'center',fontSize:9,color:'#fff',fontWeight:600,overflow:'hidden',whiteSpace:'nowrap',padding:'0 2px'}}>
-                        {seg.pct > 15 ? `${SEG_COLORS[seg.key].label} ${Math.round(seg.ms)}` : ''}
+                      <div key={si} title={`${B[seg.key].label}: ${Math.round(seg.ms)}ms`}
+                        style={{width:`${Math.max(seg.pct,4)}%`,background:B[seg.key].bg,display:'flex',alignItems:'center',justifyContent:'center',fontSize:9,color:'#fff',fontWeight:600,overflow:'hidden',whiteSpace:'nowrap',padding:'0 2px'}}>
+                        {seg.pct > 15 ? `${B[seg.key].label} ${Math.round(seg.ms)}` : ''}
                       </div>
                     ))}
                     {segments.length === 0 && (
-                      <div style={{width:'100%',background:'var(--accent-blue)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,color:'#fff'}}>{sysMs}ms</div>
+                      <div style={{width:'100%',background:'var(--accent-blue)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,color:'#fff'}}>{totalMs}ms</div>
                     )}
                   </div>
                   {isWorst && <span style={{marginLeft:8,fontSize:9,color:'var(--accent-red)',fontWeight:700}}>SLOWEST</span>}
                 </div>
                 <div className={`waterfall-value ${status}`} style={{minWidth:80,textAlign:'right'}}>
-                  {sysMs} ms
+                  {totalMs} ms
                 </div>
                 <div className="waterfall-click-hint" style={{transform:isExp?'rotate(90deg)':'none',transition:'transform 0.2s'}}>&#9654;</div>
               </div>
@@ -1212,121 +1474,118 @@ function ConversationFlowTimeline({ flow, expandedTurn, onToggleTurn }) {
             {isExp && (
               <div className="stage-log-drawer">
                 <div className="stage-log-drawer-header">
-                  <div className="stage-log-drawer-title">Turn {t.turnNumber} — Full Call Cycle</div>
+                  <div className="stage-log-drawer-title">Turn {t.turnNumber} — Latency Breakdown</div>
                   <div className="stage-log-count">{t.evgLogCount} EVG + {t.engineLogCount} Engine logs</div>
                 </div>
                 <div style={{padding:'12px 16px',fontSize:12,lineHeight:1.7,color:'var(--text-secondary)'}}>
                   {/* Conversation content */}
-                  {t.ameliaText && <div style={{marginBottom:8}}><strong style={{color:'var(--accent-purple)'}}>Amelia:</strong> "{t.ameliaText.substring(0, 200)}{t.ameliaText.length > 200 ? '...' : ''}"</div>}
-                  <div style={{marginBottom:12}}><strong style={{color:'var(--accent-blue)'}}>User:</strong> "{t.userText || '(speech)'}"</div>
+                  <div style={{marginBottom:4}}><strong style={{color:'var(--accent-blue)'}}>User:</strong> "{t.userText || '(speech)'}"</div>
+                  {t.ameliaText && <div style={{marginBottom:12}}><strong style={{color:'var(--accent-purple)'}}>Amelia:</strong> "{t.ameliaText.substring(0, 200)}{t.ameliaText.length > 200 ? '...' : ''}"</div>}
 
-                  {/* Segment breakdown table */}
+                  {/* 6-Bucket Breakdown Table */}
                   <div style={{background:'rgba(0,0,0,0.2)',borderRadius:6,padding:12,marginBottom:12}}>
-                    <div style={{fontSize:11,fontWeight:700,marginBottom:8,color:'var(--text-primary)'}}>Call Cycle Segments</div>
-                    <div style={{display:'grid',gridTemplateColumns:'160px 80px 1fr',gap:'4px 12px',fontSize:11}}>
-                      <div style={{fontWeight:600,color:'var(--text-muted)'}}>Segment</div>
+                    <div style={{fontSize:11,fontWeight:700,marginBottom:8,color:'var(--text-primary)'}}>User Speaks → Amelia Responds</div>
+                    <div style={{display:'grid',gridTemplateColumns:'200px 80px 1fr',gap:'6px 12px',fontSize:11}}>
+                      <div style={{fontWeight:600,color:'var(--text-muted)'}}>Component</div>
                       <div style={{fontWeight:600,color:'var(--text-muted)',textAlign:'right'}}>Latency</div>
                       <div style={{fontWeight:600,color:'var(--text-muted)'}}>Detail</div>
 
-                      <div style={{color:SEG_COLORS.tts.bg,fontWeight:600}}>TTS Synthesis</div>
-                      <div style={{textAlign:'right'}}>{t.ttsLatencyMs !== null ? t.ttsLatencyMs + 'ms' : '—'}</div>
-                      <div style={{opacity:0.6}}>Voice audio generation</div>
+                      {/* 1. STT */}
+                      <div style={{color:B.stt.bg,fontWeight:600}}>1. STT (ASR Finalization)</div>
+                      <div style={{textAlign:'right',fontWeight:600,color: t.b_stt > 2500 ? 'var(--accent-yellow)' : 'inherit'}}>{t.b_stt}ms</div>
+                      <div style={{opacity:0.6}}>Wait after final transcript{t.asrTimerValueMs ? ` (${t.asrTimerValueMs}ms configured)` : ''}</div>
 
-                      <div>Amelia Speaking</div>
-                      <div style={{textAlign:'right',opacity:0.5}}>{t.ameliaDurationMs ? t.ameliaDurationMs + 'ms' : '—'}</div>
-                      <div style={{opacity:0.6}}>Audio playback to user</div>
+                      {/* 2. TTS */}
+                      <div style={{color:B.tts.bg,fontWeight:600}}>2. TTS (Response Synthesis)</div>
+                      <div style={{textAlign:'right',fontWeight:600}}>{t.b_tts}ms</div>
+                      <div style={{opacity:0.6}}>Text-to-speech for Amelia's response</div>
 
-                      {/* STT Sub-phases */}
-                      <div style={{borderTop:'1px solid rgba(255,255,255,0.06)',paddingTop:4,color:'var(--text-muted)',fontWeight:600,gridColumn:'1 / -1',fontSize:10,letterSpacing:'0.3px'}}>STT / USER INPUT</div>
+                      {/* 3. EVG */}
+                      <div style={{color:B.evg.bg,fontWeight:600}}>3. EVG (Webhook)</div>
+                      <div style={{textAlign:'right',fontWeight:600}}>{t.b_evg}ms</div>
+                      <div style={{opacity:0.6}}>HTTP round-trip EVG → Engine</div>
 
-                      <div style={{paddingLeft:4,color:SEG_COLORS.sttActivation.bg}}>STT Activation</div>
-                      <div style={{textAlign:'right'}}>{t.sttActivationMs !== null ? t.sttActivationMs + 'ms' : '—'}</div>
-                      <div style={{opacity:0.6}}>Gather:exec → _startTranscribing</div>
-
-                      <div style={{paddingLeft:4,color:SEG_COLORS.speechDetect.bg}}>Speech Detection</div>
-                      <div style={{textAlign:'right'}}>{t.speechDetectionMs !== null ? t.speechDetectionMs + 'ms' : '—'}</div>
-                      <div style={{opacity:0.6}}>Waiting for user to speak</div>
-
-                      <div style={{paddingLeft:4,color:SEG_COLORS.sttRecognition.bg}}>STT Recognition</div>
-                      <div style={{textAlign:'right'}}>{t.sttRecognitionMs !== null ? t.sttRecognitionMs + 'ms' : '—'}</div>
-                      <div style={{opacity:0.6}}>Partial → Final transcript</div>
-
-                      <div style={{paddingLeft:4,color:SEG_COLORS.asrFinal.bg}}>ASR Finalization</div>
-                      <div style={{textAlign:'right',color: t.asrFinalizationMs > 2500 ? 'var(--accent-yellow)' : 'inherit'}}>{t.asrFinalizationMs !== null ? t.asrFinalizationMs + 'ms' : '—'}</div>
-                      <div style={{opacity:0.6}}>Timer wait{t.asrTimerValueMs ? ` (${t.asrTimerValueMs}ms configured)` : ''}</div>
-
-                      <div style={{paddingLeft:4,opacity:0.5}}>Total User Phase</div>
-                      <div style={{textAlign:'right',opacity:0.5}}>{t.userDurationMs ? t.userDurationMs + 'ms' : '—'}</div>
-                      <div style={{opacity:0.4}}>Gather:exec → resolve</div>
-
-                      {/* Engine phases */}
-                      <div style={{borderTop:'1px solid rgba(255,255,255,0.06)',paddingTop:4,color:'var(--text-muted)',fontWeight:600,gridColumn:'1 / -1',fontSize:10,letterSpacing:'0.3px'}}>ENGINE PROCESSING</div>
-
-                      <div style={{paddingLeft:4}}>Webhook (EVG→Engine)</div>
-                      <div style={{textAlign:'right'}}>{t.webhookMs !== null ? t.webhookMs + 'ms' : '—'}</div>
-                      <div style={{opacity:0.6}}>HTTP round-trip to Engine</div>
-
-                      <div style={{paddingLeft:4,color:SEG_COLORS.engine.bg,fontWeight:600}}>Engine (non-LLM)</div>
-                      <div style={{textAlign:'right',fontWeight:600,color: (t.engineNonLlmMs || 0) > 3000 ? 'var(--accent-red)' : 'inherit'}}>{t.engineNonLlmMs !== null ? t.engineNonLlmMs + 'ms' : (t.engineProcessingMs ? t.engineProcessingMs + 'ms' : '—')}</div>
-                      <div style={{opacity:0.6}}>NLU, Dialog, BPN, routing</div>
-
-                      {(t.llmCalls || []).map((llm, li) => (
+                      {/* 4. LLM — show task types */}
+                      <div style={{color:B.llm.bg,fontWeight:600}}>4. LLM</div>
+                      <div style={{textAlign:'right',fontWeight:600,color: t.b_llm > 3000 ? 'var(--accent-red)' : t.b_llm > 1000 ? 'var(--accent-yellow)' : 'inherit'}}>{t.b_llm}ms</div>
+                      <div style={{opacity:0.6}}>{(t.llmCalls||[]).length > 0
+                        ? `${t.llmCalls.length} call(s)`
+                        : 'No LLM calls detected'}</div>
+                      {(t.llmCalls||[]).map((llm, li) => (
                         <React.Fragment key={'llm'+li}>
-                          <div style={{paddingLeft:16,color:SEG_COLORS.llm.bg}}>↳ LLM: {llm.model || 'call'}</div>
-                          <div style={{textAlign:'right',color:SEG_COLORS.llm.bg,fontWeight:600}}>{Math.round(llm.latencyMs)}ms</div>
-                          <div style={{opacity:0.5,fontSize:10}}>{llm.detail}</div>
+                          <div style={{paddingLeft:20,color:B.llm.bg,opacity:0.9,fontSize:10}}>↳ {llm.taskType || 'ChatCompletion'}</div>
+                          <div style={{textAlign:'right',fontSize:10,color:B.llm.bg}}>{Math.round(llm.latencyMs)}ms</div>
+                          <div style={{opacity:0.4,fontSize:10}}>{llm.detail}</div>
                         </React.Fragment>
                       ))}
 
-                      {(t.llmCalls || []).length > 0 && (
-                        <React.Fragment>
-                          <div style={{paddingLeft:16,color:SEG_COLORS.llm.bg,fontWeight:600}}>↳ LLM Total</div>
-                          <div style={{textAlign:'right',color:SEG_COLORS.llm.bg,fontWeight:700}}>{t.llmTotalMs}ms</div>
-                          <div style={{opacity:0.5,fontSize:10}}>{t.llmCalls.length} LLM call(s)</div>
-                        </React.Fragment>
+                      {/* 5. API */}
+                      <div style={{color:B.api.bg,fontWeight:600}}>5. API Integrations</div>
+                      <div style={{textAlign:'right',fontWeight:600,color: t.b_api > 3000 ? 'var(--accent-red)' : t.b_api > 1000 ? 'var(--accent-yellow)' : 'inherit'}}>{t.b_api}ms</div>
+                      <div style={{opacity:0.6}}>{(t.apiCalls||[]).length > 0
+                        ? t.apiCalls.map(a => `${a.service}: ${Math.round(a.latencyMs)}ms`).join(' | ')
+                        : 'No API calls detected'}</div>
+
+                      {/* 6. Engine (other) — EXPANDABLE */}
+                      <div style={{color:B.engine.bg,fontWeight:600,cursor:'pointer',display:'flex',alignItems:'center',gap:4}}
+                        onClick={e => { e.stopPropagation(); setExpandedEngine(expandedEngine === i ? null : i); }}>
+                        <span style={{fontSize:8,transition:'transform 0.2s',display:'inline-block',transform:expandedEngine===i?'rotate(90deg)':'none'}}>&#9654;</span>
+                        6. Amelia Processing
+                      </div>
+                      <div style={{textAlign:'right',fontWeight:600,color: t.b_engine > 5000 ? 'var(--accent-red)' : t.b_engine > 2000 ? 'var(--accent-yellow)' : 'inherit'}}>{t.b_engine}ms</div>
+                      <div style={{opacity:0.6,cursor:'pointer'}} onClick={e => { e.stopPropagation(); setExpandedEngine(expandedEngine === i ? null : i); }}>
+                        {t.engineLogCount} log entries — click to expand
+                      </div>
+
+                      {/* Sub-category breakdown (shown when expanded) */}
+                      {expandedEngine === i && (t.engineSubBreakdown || []).length > 0 && (
+                        <div style={{gridColumn:'1 / -1',background:'rgba(0,0,0,0.15)',borderRadius:4,padding:'8px 12px',margin:'4px 0'}}>
+                          <div style={{display:'grid',gridTemplateColumns:'180px 60px 50px 1fr',gap:'4px 10px',fontSize:10}}>
+                            <div style={{fontWeight:600,color:'var(--text-muted)'}}>Sub-Category</div>
+                            <div style={{fontWeight:600,color:'var(--text-muted)',textAlign:'right'}}>Span</div>
+                            <div style={{fontWeight:600,color:'var(--text-muted)',textAlign:'right'}}>Logs</div>
+                            <div style={{fontWeight:600,color:'var(--text-muted)'}}>Sample Entries</div>
+                            {(t.engineSubBreakdown).map(sub => (
+                              <React.Fragment key={sub.key}>
+                                <div style={{color:sub.color,fontWeight:600}}>{sub.label}</div>
+                                <div style={{textAlign:'right'}}>{sub.spanMs > 0 ? sub.spanMs + 'ms' : '—'}</div>
+                                <div style={{textAlign:'right',opacity:0.7}}>{sub.count}</div>
+                                <div style={{opacity:0.5,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                                  {sub.entries.slice(0, 2).map(e => (e.msg || '').substring(0, 60)).join(' | ')}
+                                </div>
+                              </React.Fragment>
+                            ))}
+                          </div>
+                          {/* Raw Engine logs */}
+                          {t.engineLogCount > 0 && (
+                            <div style={{marginTop:8,borderTop:'1px solid rgba(255,255,255,0.06)',paddingTop:6}}>
+                              <div style={{fontSize:10,fontWeight:600,marginBottom:4,color:'var(--text-muted)'}}>Engine Logs ({t.engineLogCount} entries)</div>
+                              <div style={{maxHeight:200,overflow:'auto',background:'rgba(0,0,0,0.1)',borderRadius:4,padding:6}}>
+                                {(t.engineLogEntries || []).slice(0, 40).map((log, j) => (
+                                  <div key={j} className={`log-entry ${/warn|error/i.test(log.level)?'log-highlight':''}`} style={{fontSize:10,padding:'1px 0'}}>
+                                    <span className="log-ts">{log.ts?.substring(11,23)}</span>{' '}
+                                    <span className={`log-level-${(log.level||'').toLowerCase()}`}>[{log.level}]</span>{' '}{(log.msg || '').substring(0, 120)}
+                                  </div>
+                                ))}
+                                {t.engineLogCount > 40 && <div style={{fontSize:9,opacity:0.4,paddingTop:2}}>...and {t.engineLogCount - 40} more</div>}
+                              </div>
+                            </div>
+                          )}
+                        </div>
                       )}
 
-                      {(t.apiCalls || []).map((api, ai) => (
-                        <React.Fragment key={ai}>
-                          <div style={{paddingLeft:16,color:SEG_COLORS.api.bg}}>↳ API: {api.service}</div>
-                          <div style={{textAlign:'right',color:SEG_COLORS.api.bg}}>{Math.round(api.latencyMs)}ms</div>
-                          <div style={{opacity:0.5,fontSize:10}}>Submit→Return pair</div>
-                        </React.Fragment>
-                      ))}
-
-                      <div style={{paddingLeft:4,opacity:0.5}}>Total Engine</div>
-                      <div style={{textAlign:'right',opacity:0.5,color: t.engineProcessingMs > 3000 ? 'var(--accent-red)' : 'inherit'}}>{t.engineProcessingMs ? t.engineProcessingMs + 'ms' : '—'}</div>
-                      <div style={{opacity:0.4}}>{t.engineLogCount} log entries</div>
-
-                      <div style={{borderTop:'1px solid rgba(255,255,255,0.1)',paddingTop:4,fontWeight:700,color:'var(--text-primary)',gridColumn:'1 / -1'}}></div>
-                      <div style={{fontWeight:700,color:'var(--text-primary)'}}>System Wait</div>
-                      <div style={{textAlign:'right',fontWeight:700,color: sysMs > 3000 ? 'var(--accent-red)' : sysMs > 1500 ? 'var(--accent-yellow)' : 'var(--accent-green)'}}>{sysMs}ms</div>
-                      <div style={{opacity:0.6}}>User-perceived delay (Resolve → next Say)</div>
+                      {/* Total */}
+                      <div style={{borderTop:'1px solid rgba(255,255,255,0.15)',paddingTop:6,fontWeight:700,color:'var(--text-primary)'}}>Total Turn Latency</div>
+                      <div style={{borderTop:'1px solid rgba(255,255,255,0.15)',paddingTop:6,textAlign:'right',fontWeight:700,color: totalMs > 5000 ? 'var(--accent-red)' : totalMs > 2500 ? 'var(--accent-yellow)' : 'var(--accent-green)'}}>{totalMs}ms</div>
+                      <div style={{borderTop:'1px solid rgba(255,255,255,0.15)',paddingTop:6,opacity:0.6}}>Sum of all 6 components above</div>
                     </div>
                   </div>
 
                   {/* Timestamps */}
                   <div style={{opacity:0.5,fontSize:10}}>
-                    <div>Amelia spoke: {t.ameliaSpeakStartTs?.substring(11,23) || '?'} → {t.ameliaSpeakEndTs?.substring(11,23) || '?'}</div>
-                    <div>STT: Gather {t.gatherStartTs?.substring(11,23) || '?'} → Transcribing {t.sttStartTranscribingTs?.substring(11,23) || '?'} → 1st partial {t.firstTranscriptionTs?.substring(11,23) || '?'} → Final {t.lastFinalTranscriptionTs?.substring(11,23) || '?'} → Resolve {t.gatherResolveTs?.substring(11,23) || '?'}</div>
-                    <div>Engine: {t.engineStartTs?.substring(11,23) || '?'} → {t.engineEndTs?.substring(11,23) || '?'}{t.llmCalls?.length > 0 ? ` (LLM: ${t.llmCalls.map(l => l.ts?.substring(11,23) + '=' + l.latencyMs + 'ms').join(', ')})` : ''}</div>
+                    <div>Final transcript: {t.lastFinalTranscriptionTs?.substring(11,23) || '?'} → Resolve: {t.gatherResolveTs?.substring(11,23) || '?'} → Engine: {t.engineStartTs?.substring(11,23) || '?'} → Response: {t.engineEndTs?.substring(11,23) || '?'}</div>
+                    {(t.llmCalls||[]).length > 0 && <div>LLM: {t.llmCalls.map(l => l.ts?.substring(11,23) + ' ' + (l.taskType || l.model) + '=' + l.latencyMs + 'ms').join(', ')}</div>}
                   </div>
-
-                  {/* Engine logs for this turn */}
-                  {t.engineLogCount > 0 && (
-                    <div style={{marginTop:12}}>
-                      <div style={{fontSize:11,fontWeight:600,marginBottom:4}}>Engine Logs for Turn {t.turnNumber} ({t.engineLogCount} entries)</div>
-                      <div style={{maxHeight:200,overflow:'auto',background:'rgba(0,0,0,0.15)',borderRadius:4,padding:8}}>
-                        {(t.engineLogEntries || []).slice(0, 30).map((log, j) => (
-                          <div key={j} className={`log-entry ${/warn|error/i.test(log.level)?'log-highlight':''}`} style={{fontSize:10,padding:'2px 0'}}>
-                            <span className="log-ts">{log.ts?.substring(11,23)}</span>{' '}
-                            <span className={`log-level-${(log.level||'').toLowerCase()}`}>[{log.level}]</span>{' '}{(log.msg || '').substring(0, 120)}
-                          </div>
-                        ))}
-                        {t.engineLogCount > 30 && <div style={{fontSize:10,opacity:0.4,paddingTop:4}}>...and {t.engineLogCount - 30} more</div>}
-                      </div>
-                    </div>
-                  )}
                 </div>
               </div>
             )}
@@ -1342,14 +1601,14 @@ function ConversationFlowTimeline({ flow, expandedTurn, onToggleTurn }) {
         <div className="total-value" style={{color:'var(--accent-blue)',width:80,textAlign:'right'}}>{stats.systemAvgMs} ms</div>
         <div style={{width:30}}></div>
       </div>
-      {/* Segment legend — bar-level segments */}
+      {/* Segment legend */}
       <div style={{display:'flex',gap:16,padding:'8px 0',fontSize:10,opacity:0.7,flexWrap:'wrap'}}>
-        {[['tts','TTS'],['engine','Engine (non-LLM)'],['llm','LLM Calls'],['api','API Calls']].map(([k, label]) => (
+        {Object.entries(B).map(([k, v]) => (
           <div key={k} style={{display:'flex',alignItems:'center',gap:4}}>
-            <div style={{width:10,height:10,borderRadius:2,background:SEG_COLORS[k].bg}}></div>{label}
+            <div style={{width:10,height:10,borderRadius:2,background:v.bg}}></div>{v.label}
           </div>
         ))}
-        <div style={{opacity:0.5}}>| Click turn for STT sub-phases + LLM detail</div>
+        <div style={{opacity:0.5}}>| Click turn for detail</div>
       </div>
     </div>
   );
@@ -1500,10 +1759,13 @@ function Page1({ config, onOpenSettings }) {
     if ((!conversationId.trim() && !callId.trim()) || uploadedFiles.length === 0) return;
     setLoading(true); setError(null); setResults(null); setAiAnalysis(null); setExpandedStage(null); setExpandedTurn(null);
 
+    const cid = conversationId.trim();
+    const clid = callId.trim();
+
     const STEPS = [
       { id: 'read_files', label: `Reading ${uploadedFiles.length} uploaded log file(s)`, status: 'pending', detail: null },
       { id: 'filter_engine', label: 'Filtering Engine Logs by Conversation ID', status: 'pending', detail: null },
-      { id: 'filter_evg', label: 'Filtering EVG Logs by Call ID', status: 'pending', detail: null },
+      { id: 'filter_evg', label: clid ? 'Filtering EVG Logs by Call ID' : 'Auto-discovering Call ID from Engine Logs → Filtering EVG Logs', status: 'pending', detail: null },
       { id: 'combine', label: 'Combining Engine + EVG results into unified timeline', status: 'pending', detail: null },
       { id: 'classify', label: 'Classifying logs into pipeline stages (STT, NLU, Dialog, API, TTS, EVG)', status: 'pending', detail: null },
       { id: 'build_summary', label: 'Building compact summary for LLM (not sending raw logs)', status: 'pending', detail: null },
@@ -1528,8 +1790,6 @@ function Page1({ config, onOpenSettings }) {
       updateStep('read_files', 'done', `Parsed ${allParsedEntries.length.toLocaleString()} log entries from ${uploadedFiles.length} files (${formatBytes(totalBytes)}, ${totalLines.toLocaleString()} lines)`);
 
       // Step 2a: Filter Engine Logs by Conversation ID
-      const cid = conversationId.trim();
-      const clid = callId.trim();
       let engineFiltered = [];
       let evgFiltered = [];
 
@@ -1548,41 +1808,79 @@ function Page1({ config, onOpenSettings }) {
         updateStep('filter_engine', 'done', 'Skipped — no Conversation ID provided');
       }
 
-      // Step 2b: Filter EVG Logs by Call ID (with auto-discovery of jambonz callId from sbcCallid)
-      if (clid) {
-        updateStep('filter_evg', 'running');
+      // Step 2b: Filter EVG Logs by Call ID
+      // If no Call ID provided, attempt auto-discovery from Engine logs (initAttribs / script-logger)
+      let effectiveCallId = clid;
+      let autoDiscoveredCallId = null;
+
+      if (!effectiveCallId && engineFiltered.length > 0) {
+        // Auto-discover Call ID from Engine logs
+        const discovered = discoverCallIdFromEngine(engineFiltered);
+        if (discovered) {
+          effectiveCallId = discovered.sbcCallId;
+          autoDiscoveredCallId = discovered;
+        }
+      }
+
+      if (effectiveCallId) {
+        updateStep('filter_evg', 'running', autoDiscoveredCallId
+          ? `Auto-discovered SBC Call ID: ${autoDiscoveredCallId.sbcCallId} (from Engine ${autoDiscoveredCallId.source})${autoDiscoveredCallId.sipCallId ? ' | SIP: ' + autoDiscoveredCallId.sipCallId : ''}`
+          : null);
         await sleep(50);
         const evgEntries = allParsedEntries.filter(e => e.fileSource === 'evg' || e.fileSource === 'unknown');
 
         // First pass: direct match on callId, sbcCallid, or raw string
         let initialMatch = evgEntries.filter(e => {
-          if (e.callId && e.callId === clid) return true;
-          if (e.sbcCallid && e.sbcCallid === clid) return true;
-          return e.msg?.includes(clid) || e.raw?.includes(clid);
+          if (e.callId && e.callId === effectiveCallId) return true;
+          if (e.sbcCallid && e.sbcCallid === effectiveCallId) return true;
+          return e.msg?.includes(effectiveCallId) || e.raw?.includes(effectiveCallId);
         });
 
         // Auto-discover: if user provided an sbcCallid, find the actual jambonz callId and re-filter
         // The sbcCallid appears in only a few entries, but the real callId appears in all entries for the call
         const discoveredCallIds = new Set();
         initialMatch.forEach(e => {
-          if (e.callId && e.callId !== clid) discoveredCallIds.add(e.callId);
+          if (e.callId && e.callId !== effectiveCallId) discoveredCallIds.add(e.callId);
         });
+
+        // Also try with SIP call ID if SBC didn't match anything
+        if (initialMatch.length === 0 && autoDiscoveredCallId?.sipCallId) {
+          const sipId = autoDiscoveredCallId.sipCallId;
+          initialMatch = evgEntries.filter(e => {
+            if (e.callId && e.callId === sipId) return true;
+            if (e.sbcCallid && e.sbcCallid === sipId) return true;
+            return e.msg?.includes(sipId) || e.raw?.includes(sipId);
+          });
+          initialMatch.forEach(e => {
+            if (e.callId && e.callId !== sipId) discoveredCallIds.add(e.callId);
+          });
+        }
 
         if (discoveredCallIds.size > 0) {
           // Re-filter using discovered jambonz callId(s) — this catches ALL entries for the call
           evgFiltered = evgEntries.filter(e => {
-            if (e.callId && (e.callId === clid || discoveredCallIds.has(e.callId))) return true;
-            if (e.sbcCallid && e.sbcCallid === clid) return true;
+            if (e.callId && (e.callId === effectiveCallId || discoveredCallIds.has(e.callId))) return true;
+            if (e.sbcCallid && e.sbcCallid === effectiveCallId) return true;
+            // Also match SIP call ID if we used it
+            if (autoDiscoveredCallId?.sipCallId) {
+              if (e.callId && e.callId === autoDiscoveredCallId.sipCallId) return true;
+            }
             return false;
           });
           const discIds = [...discoveredCallIds].join(', ');
-          updateStep('filter_evg', 'done', `Found ${evgFiltered.length} EVG entries (auto-discovered jambonz callId: ${discIds} from SBC Call ID "${clid}")`);
-        } else {
+          const autoNote = autoDiscoveredCallId ? ' (Call ID auto-discovered from Engine initAttribs)' : '';
+          updateStep('filter_evg', 'done', `Found ${evgFiltered.length} EVG entries (jambonz callId: ${discIds} from SBC Call ID "${effectiveCallId}")${autoNote}`);
+        } else if (initialMatch.length > 0) {
           evgFiltered = initialMatch;
-          updateStep('filter_evg', 'done', `Found ${evgFiltered.length} EVG log entries matching Call ID "${clid}" (from ${evgEntries.length.toLocaleString()} EVG entries)`);
+          const autoNote = autoDiscoveredCallId ? ' (Call ID auto-discovered from Engine initAttribs)' : '';
+          updateStep('filter_evg', 'done', `Found ${evgFiltered.length} EVG log entries matching Call ID "${effectiveCallId}"${autoNote}`);
+        } else {
+          evgFiltered = [];
+          const autoNote = autoDiscoveredCallId ? ` (auto-discovered from Engine logs — SBC: ${autoDiscoveredCallId.sbcCallId}${autoDiscoveredCallId.sipCallId ? ', SIP: ' + autoDiscoveredCallId.sipCallId : ''})` : '';
+          updateStep('filter_evg', 'done', `No EVG entries found for Call ID "${effectiveCallId}"${autoNote}. EVG log files may not be uploaded.`);
         }
       } else {
-        updateStep('filter_evg', 'done', 'Skipped — no Call ID provided');
+        updateStep('filter_evg', 'done', 'Skipped — no Call ID provided and none found in Engine logs');
       }
 
       // Step 2c: Combine
@@ -1649,9 +1947,14 @@ function Page1({ config, onOpenSettings }) {
       }).filter(l => l.ms > 0 || l.count > 0);
 
       // ── FULL CONVERSATION FLOW ──
-      const conversationFlow = buildConversationFlow(evgFiltered, engineFiltered, apiPairLatencies);
+      await sleep(10); // Yield to UI before heavy processing
+      // Pass ALL engine entries (not just conversation-filtered) so per-turn time-window correlation
+      // can pick up CognitiveProvider/LLM entries that don't contain the Conversation ID text.
+      const allEngineEntries = allParsedEntries.filter(e => e.fileSource === 'engine' || e.fileSource === 'unknown');
+      const conversationFlow = buildConversationFlow(evgFiltered, engineFiltered, apiPairLatencies, allEngineEntries);
       const allTurns = conversationFlow.turns;
       const turnStats = conversationFlow.stats;
+      await sleep(10); // Yield after heavy processing
 
       // ── Enrich Stage Breakdown with computed latencies from conversation flow ──
       // The flow builder computes real latencies from timestamp deltas between boundary events.
@@ -1682,7 +1985,7 @@ function Page1({ config, onOpenSettings }) {
             detail: () => {
               const allLlm = allTurns.flatMap(t => (t.llmCalls || []));
               if (allLlm.length === 0) return null;
-              return `${allLlm.length} LLM calls: ${allLlm.map(l => l.model + '=' + Math.round(l.latencyMs) + 'ms').join(', ')}`;
+              return `${allLlm.length} LLM calls: ${allLlm.map(l => (l.taskType || l.model) + '=' + Math.round(l.latencyMs) + 'ms').join(', ')}`;
             },
           },
           dialog: {
@@ -1721,7 +2024,7 @@ function Page1({ config, onOpenSettings }) {
         });
       }
 
-      updateStep('classify', 'done', `${allTurns.length} conversation turns mapped (avg system latency: ${turnStats.systemAvgMs}ms), ${latencies.length} stages classified (${uncatCount} uncategorized)`);
+      updateStep('classify', 'done', `${allTurns.length} conversation turns mapped (avg turn latency: ${turnStats.systemAvgMs}ms), ${latencies.length} stages classified (${uncatCount} uncategorized)`);
 
       if (allTurns.length === 0 && latencies.length === 0) {
         setError(`Found ${filtered.length} matching logs but couldn't map conversation turns or extract stage latencies. Ensure both EVG and Engine logs are uploaded with correct IDs.`);
@@ -1757,6 +2060,7 @@ function Page1({ config, onOpenSettings }) {
         engineLogs: engineLogEntries, evgLogs: evgLogEntries,
         scannedTotal: allParsedEntries.length, filteredCount: filtered.length, llmPayloadInfo,
         conversationFlow, turns: allTurns, turnStats, totalConvDuration,
+        autoDiscoveredCallId,
       };
 
       setResults(data);
@@ -1790,7 +2094,7 @@ function Page1({ config, onOpenSettings }) {
     <div>
       <div className="page-header">
         <div className="page-title">Troubleshoot Conversation Latency</div>
-        <div className="page-subtitle">Upload log files and provide the Conversation ID (for Engine Logs) and/or Call ID (for EVG Logs)</div>
+        <div className="page-subtitle">Upload log files and provide the Conversation ID — the Call ID is auto-discovered from Engine logs. You can also enter the Call ID manually.</div>
       </div>
       <div className="page-body">
         <FileUploadZone files={uploadedFiles} onFilesAdded={onFilesAdded} onRemoveFile={onRemoveFile} />
@@ -1803,10 +2107,10 @@ function Page1({ config, onOpenSettings }) {
               placeholder="Used to search Engine Logs" />
           </div>
           <div className="input-group">
-            <div className="input-label">Call ID <span style={{opacity:0.5,textTransform:'none',fontWeight:400}}>(EVG / STT / TTS Logs)</span></div>
+            <div className="input-label">Call ID <span style={{opacity:0.5,textTransform:'none',fontWeight:400}}>(EVG Logs — auto-discovered if blank)</span></div>
             <input className="input-field" value={callId} onChange={e => setCallId(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && canAnalyze && handleAnalyze()}
-              placeholder="Used to search EVG Logs" />
+              placeholder="Optional — auto-discovered from Engine initAttribs" />
           </div>
           <button className="btn-primary" onClick={handleAnalyze} disabled={!canAnalyze}>
             {loading ? <><div className="spinner"></div> Processing...</> : 'Analyze Logs'}
@@ -1835,14 +2139,33 @@ function Page1({ config, onOpenSettings }) {
         {(loading || aiLoading) && pipelineSteps.length > 0 && <ProcessingPipeline steps={pipelineSteps} />}
 
         {results && (<>
+          {results.autoDiscoveredCallId && (
+            <div style={{background:'linear-gradient(135deg, rgba(16,185,129,0.08), rgba(6,182,212,0.08))',border:'1px solid rgba(16,185,129,0.25)',borderRadius:10,padding:'12px 18px',marginBottom:20,display:'flex',alignItems:'center',gap:12,fontSize:13}}>
+              <span style={{fontSize:18}}>&#128279;</span>
+              <div>
+                <div style={{color:'var(--accent-green)',fontWeight:600,marginBottom:2}}>Call ID Auto-Discovered from Engine Logs</div>
+                <div style={{color:'var(--text-secondary)',fontSize:12}}>
+                  SBC Call ID: <code style={{background:'rgba(16,185,129,0.15)',padding:'2px 8px',borderRadius:4,fontFamily:'monospace',fontSize:11}}>{results.autoDiscoveredCallId.sbcCallId}</code>
+                  {results.autoDiscoveredCallId.sipCallId && (<>
+                    {' '}| SIP Call ID: <code style={{background:'rgba(6,182,212,0.15)',padding:'2px 8px',borderRadius:4,fontFamily:'monospace',fontSize:11}}>{results.autoDiscoveredCallId.sipCallId}</code>
+                  </>)}
+                  <span style={{opacity:0.5}}> — found in {results.autoDiscoveredCallId.source}</span>
+                </div>
+              </div>
+            </div>
+          )}
+          {results.conversationFlow && results.conversationFlow.turns.length > 0 && (
+            <ConversationTranscript flow={results.conversationFlow} />
+          )}
+
           <div className="stats-grid">
             {results.turnStats && results.turnStats.turnCount > 0 ? (<>
-              <div className="stat-card"><div className="stat-label">Avg System Latency</div>
+              <div className="stat-card"><div className="stat-label">Avg Turn Latency</div>
                 <div className="stat-value" style={{color: results.turnStats.systemAvgMs>3000?'var(--accent-red)':results.turnStats.systemAvgMs>1500?'var(--accent-yellow)':'var(--accent-green)'}}>{results.turnStats.systemAvgMs}<span style={{fontSize:14,opacity:0.6}}>ms</span></div>
-                <div className="stat-sub">User-perceived wait across {results.turnStats.turnCount} turns</div></div>
+                <div className="stat-sub">User speaks → Amelia responds ({results.turnStats.turnCount} turns)</div></div>
               <div className="stat-card"><div className="stat-label">Slowest Turn</div>
                 <div className="stat-value" style={{color:'var(--accent-red)'}}>{results.turnStats.systemWorstMs}<span style={{fontSize:14,opacity:0.6}}>ms</span></div>
-                <div className="stat-sub">Turn {results.turnStats.systemWorstTurn} | Engine avg: {results.turnStats.engineAvgMs}ms</div></div>
+                <div className="stat-sub">Turn {results.turnStats.systemWorstTurn} | STT avg: {results.turnStats.sttAvgMs}ms | Engine avg: {results.turnStats.engineAvgMs}ms</div></div>
               <div className="stat-card"><div className="stat-label">Conversation</div>
                 <div className="stat-value">{(results.turnStats.totalConversationMs / 1000).toFixed(1)}<span style={{fontSize:14,opacity:0.6}}>s</span></div>
                 <div className="stat-sub">{results.turnStats.turnCount} turns | TTS avg: {results.turnStats.ttsAvgMs}ms | LLM avg: {results.turnStats.llmAvgMs}ms | P95: {results.turnStats.systemP95Ms}ms</div></div>

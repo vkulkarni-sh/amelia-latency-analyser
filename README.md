@@ -12,14 +12,16 @@ A browser-based diagnostic tool for analyzing latency in Amelia AI voice convers
 
 ### Page 1 — Conversation Troubleshooter
 
-- **Full Call Cycle Mapping**: Traces each turn through the complete path — Amelia → EVG → TTS → User → STT → Amelia → Integrations → Amelia
-- **Turn-by-Turn Timeline**: Visual waterfall chart showing system latency per turn with color-coded segment bars (TTS, Engine, LLM, API)
-- **STT Sub-Phase Breakdown**: Splits user input into 4 distinct phases — STT Activation, Speech Detection, STT Recognition, and ASR Finalization (timer wait)
-- **Engine / LLM Split**: Separates LLM call latency from general Engine processing (NLU, Dialog/BPN, routing) so you can see exactly how much time the model consumes
+- **Call ID Auto-Discovery**: Just enter the Conversation ID — the tool automatically extracts the SBC Call ID and SIP Call ID from the Engine `initAttribs` log, so you don't need to find and enter the Call ID manually
+- **Conversation Transcript**: Full User/Amelia dialog displayed as a chat-style transcript with timestamps and per-turn response times
+- **6-Bucket Latency Model**: Each turn breaks down into 6 components that sum to the total: STT (ASR timer) | TTS (response synthesis) | EVG (webhook) | LLM (cognitive provider) | API (integrations) | Amelia Processing (engine)
+- **Turn-by-Turn Timeline**: Visual waterfall chart showing turn latency with color-coded 6-bucket segment bars
+- **CognitiveProvider Task Types**: LLM calls show specific task types (AgenticPlanning:AssignAgent, AgenticExecution:HandoverExecution, AgenticResponseHandling:ClassifyTaskType, UserEngagementMessage:GenerateFillerMessage, etc.)
+- **Expandable Amelia Processing**: Click to drill into Engine sub-categories (Agentic Execution, Cognitive Provider, Dialog/BPN, Dialog State, User Engagement, User/Session Mgmt, NLU, API) with log counts and time spans
 - **API Call Pairing**: Matches `Submitting requestId` / `Returned requestId` pairs to compute individual API integration latencies with service names
-- **Stage Breakdown**: Aggregated latency by pipeline stage (STT, NLU, Dialog, API, TTS, EVG) with computed averages from the conversation flow
+- **Stage Breakdown**: Aggregated latency by pipeline stage with computed averages from the conversation flow
 - **AI-Powered Analysis**: Sends a compact summary (never raw logs) to OpenAI GPT-4.1 for root cause analysis and actionable recommendations
-- **Drill-Down Logs**: Click any turn or stage to see the correlated Engine and EVG log entries with timestamps
+- **Drill-Down Logs**: Click any turn or Amelia Processing row to see correlated Engine and EVG log entries with timestamps
 - **Multi-File Support**: Upload multiple log files (.log, .txt, .json, .jsonl, .csv, .ndjson) — the tool searches across all of them
 - **Auto-Discovery**: Automatically discovers jambonz callIds from SBC Call IDs and correlates Engine logs by conversation ID
 
@@ -52,8 +54,8 @@ The file works on Netlify, Vercel, Cloudflare Pages, S3, or any static hosting. 
 ## How to Use
 
 1. **Upload Logs** — Drag and drop your Engine Logs and/or EVG (jambonz) Logs into the upload zone
-2. **Enter IDs** — Provide the Conversation ID (searches Engine Logs) and/or Call ID (searches EVG Logs)
-3. **Click Analyze** — The tool parses all files, filters by ID, classifies entries, builds the conversation flow, and runs AI analysis
+2. **Enter Conversation ID** — That's it. The Call ID is auto-discovered from the Engine `initAttribs` log line. You can still enter a Call ID manually if needed.
+3. **Click Analyze** — The tool parses all files, auto-discovers the Call ID, filters by both IDs, classifies entries, builds the conversation flow, and runs AI analysis
 
 ### What You'll See
 
