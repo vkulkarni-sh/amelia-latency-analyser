@@ -3,7 +3,10 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Amelia Latency Analyser</title>
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
+<title>Amelia Latency Analyser v2.1</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
@@ -201,7 +204,6 @@ const { useState, useEffect, useCallback, useRef } = React;
 // Supports: .log, .txt, .json, .jsonl, .csv, .ndjson
 
 function parseLogFile(text, fileName) {
-  const lines = text.split('\n');
   const entries = [];
 
   // Detect if the file is Engine or EVG based on filename
@@ -210,16 +212,22 @@ function parseLogFile(text, fileName) {
   if (/engine|amelia|nlu|dialog|api|backend/i.test(fnLower)) fileSource = 'engine';
   else if (/evg|jambonz|stt|tts|voice|speech|gateway|orchestrat/i.test(fnLower)) fileSource = 'evg';
 
-  // Check if it's a CSV file (Engine format from Axiom export)
+  // Check if it's a CSV file — peek at first line only (avoid splitting entire 100MB+ file)
   let isCSV = false;
-  if (fnLower.includes('.csv') || (lines.length > 0 && lines[0].includes('_time,') && lines[0].includes(',message,'))) {
+  const firstNl = text.indexOf('\n');
+  const firstLine = firstNl > 0 ? text.substring(0, firstNl) : text.substring(0, 500);
+  if (fnLower.includes('.csv') || (firstLine.includes('_time,') && firstLine.includes(',message,'))) {
     isCSV = true;
     fileSource = 'engine';
   }
 
   if (isCSV) {
-    entries.push(...parseCSVLogFile(lines, fileName));
+    // Use quote-aware row splitter — handles embedded newlines in multi-line Java stack traces
+    const csvRows = splitCSVIntoRows(text);
+    const csvEntries = parseCSVLogFile(csvRows, fileName);
+    for (let ci = 0; ci < csvEntries.length; ci++) entries.push(csvEntries[ci]);
   } else {
+    const lines = text.split('\n');
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       if (!line.trim()) continue;
@@ -256,7 +264,9 @@ function parseCSVLogFile(lines, fileName) {
   const entries = [];
   if (lines.length < 2) return entries;
 
-  const header = lines[0].split(',').map(h => h.trim());
+  const header = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
+  // Filter out ghost columns (empty headers from Excel/Windows CSV exports)
+  const validHeaders = new Set(header.filter(h => h.length > 0));
   const timeIdx = header.indexOf('_time');
   const fileIdx = header.indexOf('file');
   const hostIdx = header.indexOf('host');
@@ -266,14 +276,17 @@ function parseCSVLogFile(lines, fileName) {
 
   if (messageIdx === -1) return entries; // Not a valid Engine CSV
 
+  // Compute the highest column index we actually need — skip ghost columns beyond this
+  const maxNeededIdx = Math.max(timeIdx, fileIdx, hostIdx, messageIdx, sourceTypeIdx, timestampIdx);
+
   // Parse CSV rows
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
     if (!line.trim()) continue;
 
-    // Simple CSV parse - handle quoted fields
-    const row = parseCSVRow(line);
-    if (row.length < 4) continue;
+    // CSV parse with early termination: stop after last needed column (skips 176 ghost columns)
+    const row = parseCSVRow(line, maxNeededIdx + 1);
+    if (row.length <= messageIdx) continue;
 
     const message = row[messageIdx] || '';
     if (!message.trim()) continue;
@@ -299,7 +312,34 @@ function parseCSVLogFile(lines, fileName) {
   return entries;
 }
 
-function parseCSVRow(line) {
+/**
+ * Split CSV text into rows, correctly handling quoted fields with embedded newlines.
+ * Production Engine CSVs have multi-line Java stack traces inside the message column.
+ */
+function splitCSVIntoRows(text) {
+  const rows = [];
+  let inQuotes = false;
+  let rowStart = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charCodeAt(i);
+    if (ch === 34) { inQuotes = !inQuotes; }
+    else if (ch === 10 && !inQuotes) {
+      if (i > rowStart) rows.push(text.substring(rowStart, i));
+      rowStart = i + 1;
+    } else if (ch === 13 && !inQuotes) {
+      if (i > rowStart) rows.push(text.substring(rowStart, i));
+      if (i + 1 < text.length && text.charCodeAt(i + 1) === 10) i++;
+      rowStart = i + 1;
+    }
+  }
+  if (rowStart < text.length) {
+    const last = text.substring(rowStart);
+    if (last.trim()) rows.push(last);
+  }
+  return rows;
+}
+
+function parseCSVRow(line, maxFields) {
   const result = [];
   let current = '';
   let inQuotes = false;
@@ -311,6 +351,8 @@ function parseCSVRow(line) {
     } else if (char === ',' && !inQuotes) {
       result.push(current.trim());
       current = '';
+      // Early termination: skip ghost columns we don't need
+      if (maxFields && result.length >= maxFields) return result;
     } else {
       current += char;
     }
@@ -735,22 +777,29 @@ function classifyEngineLogSubCategory(entry) {
  * Build sub-category breakdown from Engine log entries within a turn.
  * Returns array of { key, label, color, count, entries, spanMs }
  */
-function buildEngineSubBreakdown(engineLogEntries) {
+function buildEngineSubBreakdown(engineLogEntries, excludeKeys, includeOnlyKeys) {
   if (!engineLogEntries || engineLogEntries.length === 0) return [];
+  // excludeKeys: set of sub-category keys to exclude
+  // includeOnlyKeys: if provided, ONLY include these keys (for LLM sub-breakdown)
   const groups = {};
   ENGINE_SUB_CATEGORIES.forEach(c => { groups[c.key] = []; });
   engineLogEntries.forEach(e => {
     const cat = classifyEngineLogSubCategory(e);
     groups[cat].push(e);
   });
-  return ENGINE_SUB_CATEGORIES.map(c => {
-    const entries = groups[c.key];
-    if (entries.length === 0) return null;
-    // Compute time span from first to last entry in this sub-category
-    const times = entries.map(e => e.ts ? new Date(e.ts).getTime() : NaN).filter(t => !isNaN(t)).sort((a, b) => a - b);
-    const spanMs = times.length >= 2 ? times[times.length - 1] - times[0] : 0;
-    return { ...c, count: entries.length, entries, spanMs };
-  }).filter(Boolean);
+  return ENGINE_SUB_CATEGORIES
+    .filter(c => {
+      if (includeOnlyKeys) return includeOnlyKeys.has(c.key);
+      if (excludeKeys) return !excludeKeys.has(c.key);
+      return true;
+    })
+    .map(c => {
+      const entries = groups[c.key];
+      if (entries.length === 0) return null;
+      const times = entries.map(e => e.ts ? new Date(e.ts).getTime() : NaN).filter(t => !isNaN(t)).sort((a, b) => a - b);
+      const spanMs = times.length >= 2 ? times[times.length - 1] - times[0] : 0;
+      return { ...c, count: entries.length, entries, spanMs };
+    }).filter(Boolean);
 }
 
 // ═══════════════════════════════════════════════
@@ -1062,8 +1111,13 @@ function buildConversationFlow(evgLogs, engineLogs, apiPairLatencies, allEngineL
       llmCalls = llmDeduped;
     }
 
-    // Compute LLM total for this turn
-    const llmTotalMs = llmCalls.reduce((s, l) => s + l.latencyMs, 0);
+    // Mark UserEngagementMessage calls as parallel (they run on a separate thread
+    // and don't block the main conversation processing, so they shouldn't be summed into LLM latency)
+    llmCalls.forEach(c => {
+      c.isParallel = /^UserEngagementMessage:/i.test(c.taskType || '');
+    });
+    // Compute LLM total — only count non-parallel (blocking) calls
+    const llmTotalMs = llmCalls.filter(l => !l.isParallel).reduce((s, l) => s + l.latencyMs, 0);
     const engineNonLlmMs = engineMs ? Math.max(0, engineMs - llmTotalMs) : null;
 
     // ── RESPONSE TTS ── (TTS synthesis for Amelia's RESPONSE to this turn, not the previous utterance)
@@ -1108,10 +1162,22 @@ function buildConversationFlow(evgLogs, engineLogs, apiPairLatencies, allEngineL
       apiCalls,
       asrTimerValueMs,
       responseTtsMs,
+      // Filter engine log entries: separate LLM/parallel entries from Amelia Processing entries
+      // CognitiveProvider → shown under LLM heading
+      // UserEngagement → runs in parallel, excluded from all latency calculations
+      engineLogEntriesForAmelia: engineLogEntries.filter(e => {
+        const cat = classifyEngineLogSubCategory(e);
+        return cat !== 'cognitive' && cat !== 'engagement';
+      }),
       // Engine sub-breakdown (for expandable Amelia Processing detail)
-      engineSubBreakdown: buildEngineSubBreakdown(engineLogEntries),
-      // Raw data for logs
-      engineLogCount: engineLogEntries.length,
+      engineSubBreakdown: buildEngineSubBreakdown(engineLogEntries, new Set(['cognitive', 'engagement'])),
+      // LLM sub-breakdown: Cognitive Provider log entries (shown under LLM heading)
+      llmSubBreakdown: buildEngineSubBreakdown(engineLogEntries, null, new Set(['cognitive'])),
+      // Raw data for logs (all entries, for full log viewer)
+      engineLogCount: engineLogEntries.filter(e => {
+        const cat = classifyEngineLogSubCategory(e);
+        return cat !== 'cognitive' && cat !== 'engagement';
+      }).length,
       engineLogEntries,
       evgLogCount: evgTurnLogs.length,
       evgTurnLogs,
@@ -1137,10 +1203,10 @@ function buildConversationFlow(evgLogs, engineLogs, apiPairLatencies, allEngineL
     turnCount: turns.length,
     systemAvgMs: turnLats.length > 0 ? Math.round(turnLats.reduce((s,v) => s+v, 0) / turnLats.length) : 0,
     systemMedianMs: sortedTurn.length > 0 ? Math.round(sortedTurn[Math.floor(sortedTurn.length / 2)]) : 0,
-    systemWorstMs: turnLats.length > 0 ? Math.round(Math.max(...turnLats)) : 0,
-    systemBestMs: turnLats.length > 0 ? Math.round(Math.min(...turnLats)) : 0,
+    systemWorstMs: turnLats.length > 0 ? Math.round(turnLats.reduce((a, b) => a > b ? a : b)) : 0,
+    systemBestMs: turnLats.length > 0 ? Math.round(turnLats.reduce((a, b) => a < b ? a : b)) : 0,
     systemP95Ms: sortedTurn.length >= 2 ? Math.round(sortedTurn[Math.floor(sortedTurn.length * 0.95)]) : (sortedTurn[0] || 0),
-    systemWorstTurn: turnLats.length > 0 ? turns.find(t => t.totalTurnMs === Math.max(...turnLats))?.turnNumber : null,
+    systemWorstTurn: turnLats.length > 0 ? turns.find(t => t.totalTurnMs === turnLats.reduce((a, b) => a > b ? a : b))?.turnNumber : null,
     engineAvgMs: turns.length > 0 ? Math.round(turns.map(t => t.b_engine).reduce((s,v) => s+v, 0) / turns.length) : 0,
     ttsAvgMs: ttsLats.length > 0 ? Math.round(ttsLats.reduce((s,v) => s+v, 0) / ttsLats.length) : 0,
     llmAvgMs: llmLats.length > 0 ? Math.round(llmLats.reduce((s,v) => s+v, 0) / llmLats.length) : 0,
@@ -1410,6 +1476,7 @@ function ConversationFlowTimeline({ flow, expandedTurn, onToggleTurn }) {
   const { turns, stats } = flow;
   const maxMs = stats.systemWorstMs || 1;
   const [expandedEngine, setExpandedEngine] = useState(null); // track which turn's engine sub-breakdown is open
+  const [expandedLlm, setExpandedLlm] = useState(null); // track which turn's LLM sub-breakdown is open
 
   // 6-bucket colors
   const B = {
@@ -1505,19 +1572,76 @@ function ConversationFlowTimeline({ flow, expandedTurn, onToggleTurn }) {
                       <div style={{textAlign:'right',fontWeight:600}}>{t.b_evg}ms</div>
                       <div style={{opacity:0.6}}>HTTP round-trip EVG → Engine</div>
 
-                      {/* 4. LLM — show task types */}
-                      <div style={{color:B.llm.bg,fontWeight:600}}>4. LLM</div>
+                      {/* 4. LLM — EXPANDABLE with task types + Cognitive Provider breakdown */}
+                      <div style={{color:B.llm.bg,fontWeight:600,cursor:'pointer',display:'flex',alignItems:'center',gap:4}}
+                        onClick={e => { e.stopPropagation(); setExpandedLlm(expandedLlm === i ? null : i); }}>
+                        <span style={{fontSize:8,transition:'transform 0.2s',display:'inline-block',transform:expandedLlm===i?'rotate(90deg)':'none'}}>&#9654;</span>
+                        4. LLM
+                      </div>
                       <div style={{textAlign:'right',fontWeight:600,color: t.b_llm > 3000 ? 'var(--accent-red)' : t.b_llm > 1000 ? 'var(--accent-yellow)' : 'inherit'}}>{t.b_llm}ms</div>
-                      <div style={{opacity:0.6}}>{(t.llmCalls||[]).length > 0
-                        ? `${t.llmCalls.length} call(s)`
-                        : 'No LLM calls detected'}</div>
+                      <div style={{opacity:0.6,cursor:'pointer'}} onClick={e => { e.stopPropagation(); setExpandedLlm(expandedLlm === i ? null : i); }}>
+                        {(t.llmCalls||[]).length > 0
+                        ? `${t.llmCalls.length} call(s) — click to expand`
+                        : 'No LLM calls detected'}
+                      </div>
+                      {/* LLM task type calls — parallel calls shown dimmed with label */}
                       {(t.llmCalls||[]).map((llm, li) => (
                         <React.Fragment key={'llm'+li}>
-                          <div style={{paddingLeft:20,color:B.llm.bg,opacity:0.9,fontSize:10}}>↳ {llm.taskType || 'ChatCompletion'}</div>
-                          <div style={{textAlign:'right',fontSize:10,color:B.llm.bg}}>{Math.round(llm.latencyMs)}ms</div>
-                          <div style={{opacity:0.4,fontSize:10}}>{llm.detail}</div>
+                          <div style={{paddingLeft:20,color:B.llm.bg,opacity: llm.isParallel ? 0.4 : 0.9,fontSize:10}}>
+                            ↳ {llm.taskType || 'ChatCompletion'}
+                            {llm.isParallel && <span style={{color:'var(--text-muted)',fontStyle:'italic'}}> (parallel)</span>}
+                          </div>
+                          <div style={{textAlign:'right',fontSize:10,color:B.llm.bg,opacity: llm.isParallel ? 0.4 : 1,textDecoration: llm.isParallel ? 'line-through' : 'none'}}>{Math.round(llm.latencyMs)}ms</div>
+                          <div style={{opacity: llm.isParallel ? 0.25 : 0.4,fontSize:10}}>{llm.isParallel ? 'Not counted (parallel thread)' : llm.detail}</div>
                         </React.Fragment>
                       ))}
+
+                      {/* LLM expanded: Cognitive Provider + User Engagement log breakdown */}
+                      {expandedLlm === i && (
+                        <div style={{gridColumn:'1 / -1',background:'rgba(249,115,22,0.05)',borderRadius:4,padding:'8px 12px',margin:'4px 0',border:'1px solid rgba(249,115,22,0.15)'}}>
+                          {/* LLM Sub-category grid (Cognitive Provider, User Engagement) */}
+                          {(t.llmSubBreakdown||[]).length > 0 && (
+                            <div style={{marginBottom:8}}>
+                              <div style={{fontSize:10,fontWeight:600,marginBottom:6,color:B.llm.bg}}>Cognitive Provider / LLM Log Breakdown</div>
+                              <div style={{display:'grid',gridTemplateColumns:'200px 60px 50px 1fr',gap:'4px 10px',fontSize:10}}>
+                                <div style={{fontWeight:600,color:'var(--text-muted)'}}>Sub-Category</div>
+                                <div style={{fontWeight:600,color:'var(--text-muted)',textAlign:'right'}}>Span</div>
+                                <div style={{fontWeight:600,color:'var(--text-muted)',textAlign:'right'}}>Logs</div>
+                                <div style={{fontWeight:600,color:'var(--text-muted)'}}>Sample Entries</div>
+                                {(t.llmSubBreakdown).map(sub => (
+                                  <React.Fragment key={sub.key}>
+                                    <div style={{color:sub.color,fontWeight:600}}>{sub.label}</div>
+                                    <div style={{textAlign:'right'}}>{sub.spanMs > 0 ? sub.spanMs + 'ms' : '—'}</div>
+                                    <div style={{textAlign:'right',opacity:0.7}}>{sub.count}</div>
+                                    <div style={{opacity:0.5,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                                      {sub.entries.slice(0, 2).map(e => (e.msg || '').substring(0, 80)).join(' | ')}
+                                    </div>
+                                  </React.Fragment>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {/* LLM-related Engine Logs */}
+                          {(() => {
+                            const llmLogs = (t.llmSubBreakdown||[]).flatMap(s => s.entries || []);
+                            if (llmLogs.length === 0) return <div style={{fontSize:10,color:'var(--text-muted)'}}>No Cognitive Provider log entries in this turn's time window</div>;
+                            return (
+                              <div style={{borderTop: (t.llmSubBreakdown||[]).length > 0 ? '1px solid rgba(255,255,255,0.06)' : 'none',paddingTop:6}}>
+                                <div style={{fontSize:10,fontWeight:600,marginBottom:4,color:'var(--text-muted)'}}>LLM Engine Logs ({llmLogs.length} entries)</div>
+                                <div style={{maxHeight:180,overflow:'auto',background:'rgba(0,0,0,0.1)',borderRadius:4,padding:6}}>
+                                  {llmLogs.slice(0, 30).map((log, j) => (
+                                    <div key={j} className={`log-entry ${/warn|error/i.test(log.level)?'log-highlight':''}`} style={{fontSize:10,padding:'1px 0'}}>
+                                      <span className="log-ts">{log.ts?.substring(11,23)}</span>{' '}
+                                      <span className={`log-level-${(log.level||'').toLowerCase()}`}>[{log.level}]</span>{' '}{(log.msg || '').substring(0, 120)}
+                                    </div>
+                                  ))}
+                                  {llmLogs.length > 30 && <div style={{fontSize:9,opacity:0.4,paddingTop:2}}>...and {llmLogs.length - 30} more</div>}
+                                </div>
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      )}
 
                       {/* 5. API */}
                       <div style={{color:B.api.bg,fontWeight:600}}>5. API Integrations</div>
@@ -1556,18 +1680,18 @@ function ConversationFlowTimeline({ flow, expandedTurn, onToggleTurn }) {
                               </React.Fragment>
                             ))}
                           </div>
-                          {/* Raw Engine logs */}
-                          {t.engineLogCount > 0 && (
+                          {/* Raw Engine logs (excluding LLM/parallel entries) */}
+                          {(t.engineLogEntriesForAmelia||[]).length > 0 && (
                             <div style={{marginTop:8,borderTop:'1px solid rgba(255,255,255,0.06)',paddingTop:6}}>
-                              <div style={{fontSize:10,fontWeight:600,marginBottom:4,color:'var(--text-muted)'}}>Engine Logs ({t.engineLogCount} entries)</div>
+                              <div style={{fontSize:10,fontWeight:600,marginBottom:4,color:'var(--text-muted)'}}>Engine Logs ({(t.engineLogEntriesForAmelia||[]).length} entries)</div>
                               <div style={{maxHeight:200,overflow:'auto',background:'rgba(0,0,0,0.1)',borderRadius:4,padding:6}}>
-                                {(t.engineLogEntries || []).slice(0, 40).map((log, j) => (
+                                {(t.engineLogEntriesForAmelia || []).slice(0, 40).map((log, j) => (
                                   <div key={j} className={`log-entry ${/warn|error/i.test(log.level)?'log-highlight':''}`} style={{fontSize:10,padding:'1px 0'}}>
                                     <span className="log-ts">{log.ts?.substring(11,23)}</span>{' '}
                                     <span className={`log-level-${(log.level||'').toLowerCase()}`}>[{log.level}]</span>{' '}{(log.msg || '').substring(0, 120)}
                                   </div>
                                 ))}
-                                {t.engineLogCount > 40 && <div style={{fontSize:9,opacity:0.4,paddingTop:2}}>...and {t.engineLogCount - 40} more</div>}
+                                {(t.engineLogEntriesForAmelia||[]).length > 40 && <div style={{fontSize:9,opacity:0.4,paddingTop:2}}>...and {(t.engineLogEntriesForAmelia||[]).length - 40} more</div>}
                               </div>
                             </div>
                           )}
@@ -1617,7 +1741,7 @@ function ConversationFlowTimeline({ flow, expandedTurn, onToggleTurn }) {
 function StageBreakdownChart({ latencies, stageLogs, expandedStage, onToggleStage }) {
   if (!latencies || latencies.length === 0) return null;
   const withMs = latencies.filter(l => l.ms > 0);
-  const maxMs = withMs.length > 0 ? Math.max(...withMs.map(l => l.ms)) : 1;
+  const maxMs = withMs.length > 0 ? withMs.reduce((mx, l) => l.ms > mx ? l.ms : mx, 0) : 1;
   const getStatus = (ms) => ms > 1000 ? 'critical' : ms > 400 ? 'warning' : 'normal';
   return (
     <div className="waterfall-container">
@@ -1738,6 +1862,11 @@ function Page1({ config, onOpenSettings }) {
   const [expandedTurn, setExpandedTurn] = useState(null);
   const [pipelineSteps, setPipelineSteps] = useState([]);
 
+  // ── Extract workflow state ──
+  const [extractedData, setExtractedData] = useState(null);   // { entries, summary }
+  const [extracting, setExtracting] = useState(false);
+  const [extractPipeline, setExtractPipeline] = useState([]);
+
   const onFilesAdded = (newFiles) => {
     const items = newFiles.map(f => {
       const n = f.name.toLowerCase();
@@ -1747,23 +1876,132 @@ function Page1({ config, onOpenSettings }) {
       return { file: f, detectedSource: src };
     });
     setUploadedFiles(prev => [...prev, ...items]);
+    // Reset extraction when files change — user must re-extract
+    setExtractedData(null);
+    setResults(null); setAiAnalysis(null); setError(null);
   };
 
-  const onRemoveFile = (idx) => setUploadedFiles(prev => prev.filter((_, i) => i !== idx));
+  const onRemoveFile = (idx) => {
+    setUploadedFiles(prev => prev.filter((_, i) => i !== idx));
+    setExtractedData(null);
+    setResults(null); setAiAnalysis(null); setError(null);
+  };
 
   const updateStep = (id, status, detail) => {
     setPipelineSteps(prev => prev.map(s => s.id === id ? { ...s, status, detail: detail || s.detail } : s));
   };
 
+  const updateExtractStep = (id, status, detail) => {
+    setExtractPipeline(prev => prev.map(s => s.id === id ? { ...s, status, detail: detail || s.detail } : s));
+  };
+
+  // ── EXTRACT: Parse all files into a flat normalized structure ──
+  const handleExtract = async () => {
+    if (uploadedFiles.length === 0) return;
+    setExtracting(true); setExtractedData(null); setError(null); setResults(null); setAiAnalysis(null);
+
+    const EX_STEPS = [
+      { id: 'read_files', label: `Reading ${uploadedFiles.length} uploaded log file(s)`, status: 'pending', detail: null },
+      { id: 'normalize', label: 'Normalizing → flat structure (CRLF, ghost columns, epoch→UTC)', status: 'pending', detail: null },
+      { id: 'index', label: 'Indexing conversation IDs & call IDs', status: 'pending', detail: null },
+    ];
+    setExtractPipeline(EX_STEPS);
+
+    try {
+      // Step 1: Read all files
+      updateExtractStep('read_files', 'running');
+      const allParsedEntries = [];
+      let totalLines = 0;
+      let totalBytes = 0;
+      const perFile = [];
+
+      for (const uf of uploadedFiles) {
+        const text = await uf.file.text();
+        totalBytes += uf.file.size;
+        const entries = parseLogFile(text, uf.file.name);
+        let nlCount = 0; for (let ni = 0; ni < text.length; ni++) { if (text.charCodeAt(ni) === 10) nlCount++; }
+        totalLines += nlCount + 1;
+        for (let ei = 0; ei < entries.length; ei++) allParsedEntries.push(entries[ei]);
+        perFile.push({ name: uf.file.name, source: uf.detectedSource, entries: entries.length, size: uf.file.size });
+      }
+      updateExtractStep('read_files', 'done', `Parsed ${allParsedEntries.length.toLocaleString()} log entries from ${uploadedFiles.length} files (${formatBytes(totalBytes)}, ${totalLines.toLocaleString()} lines)`);
+
+      // Step 2: Normalize
+      updateExtractStep('normalize', 'running');
+      await sleep(30);
+      let crlfFixed = 0, epochConverted = 0, blankEntriesDropped = 0;
+      const normalizedEntries = [];
+      for (let ni = 0; ni < allParsedEntries.length; ni++) {
+        const e = allParsedEntries[ni];
+        if (e.ts && typeof e.ts === 'string' && e.ts.includes('\r')) { e.ts = e.ts.replace(/\r/g, ''); crlfFixed++; }
+        if (e.msg && typeof e.msg === 'string' && e.msg.includes('\r')) { e.msg = e.msg.replace(/\r/g, ''); crlfFixed++; }
+        if (e.raw && typeof e.raw === 'string' && e.raw.includes('\r')) { e.raw = e.raw.replace(/\r/g, ''); }
+        if (e.ts && typeof e.ts === 'string' && /^\d{10,13}$/.test(e.ts.trim())) {
+          e.ts = new Date(parseInt(e.ts.trim())).toISOString(); epochConverted++;
+        } else if (e.ts && typeof e.ts === 'number') {
+          e.ts = new Date(e.ts).toISOString(); epochConverted++;
+        }
+        if (!e.msg || !e.msg.trim()) { blankEntriesDropped++; continue; }
+        normalizedEntries.push(e);
+      }
+      const normDetails = [];
+      if (crlfFixed > 0) normDetails.push(`${crlfFixed} CRLF artifacts cleaned`);
+      if (epochConverted > 0) normDetails.push(`${epochConverted} epoch timestamps → UTC`);
+      if (blankEntriesDropped > 0) normDetails.push(`${blankEntriesDropped} blank entries dropped`);
+      normDetails.push(`${normalizedEntries.length.toLocaleString()} entries in flat structure`);
+      updateExtractStep('normalize', 'done', normDetails.join(' | '));
+
+      // Step 3: Index conversation IDs and call IDs for quick lookup
+      updateExtractStep('index', 'running');
+      await sleep(30);
+      const engineEntries = normalizedEntries.filter(e => e.fileSource === 'engine');
+      const evgEntries = normalizedEntries.filter(e => e.fileSource === 'evg');
+      const convIdCounts = {};
+      engineEntries.forEach(e => { if (e.conversationId) convIdCounts[e.conversationId] = (convIdCounts[e.conversationId] || 0) + 1; });
+      const convIds = new Set(Object.keys(convIdCounts));
+      const callIds = new Set();
+      evgEntries.forEach(e => { if (e.callId) callIds.add(e.callId); });
+
+      // Timestamp range
+      let minTs = null, maxTs = null;
+      normalizedEntries.forEach(e => {
+        if (!e.ts) return;
+        if (!minTs || e.ts < minTs) minTs = e.ts;
+        if (!maxTs || e.ts > maxTs) maxTs = e.ts;
+      });
+
+      updateExtractStep('index', 'done', `${convIds.size} unique Conversation IDs | ${callIds.size} unique Call IDs | ${engineEntries.length.toLocaleString()} Engine + ${evgEntries.length.toLocaleString()} EVG entries`);
+
+      const summary = {
+        totalEntries: normalizedEntries.length,
+        engineCount: engineEntries.length,
+        evgCount: evgEntries.length,
+        convIdCount: convIds.size,
+        callIdCount: callIds.size,
+        totalBytes, totalLines,
+        perFile,
+        crlfFixed, epochConverted, blankEntriesDropped,
+        minTs, maxTs,
+        // Sort conversation IDs by entry count descending for quick selection
+        convIdList: Object.entries(convIdCounts).sort((a, b) => b[1] - a[1]).map(([id, count]) => ({ id, count })),
+      };
+
+      setExtractedData({ entries: normalizedEntries, summary });
+      setExtracting(false);
+    } catch (err) {
+      setError('Extraction failed: ' + err.message);
+      setExtracting(false);
+    }
+  };
+
   const handleAnalyze = async () => {
-    if ((!conversationId.trim() && !callId.trim()) || uploadedFiles.length === 0) return;
+    if ((!conversationId.trim() && !callId.trim()) || !extractedData) return;
     setLoading(true); setError(null); setResults(null); setAiAnalysis(null); setExpandedStage(null); setExpandedTurn(null);
 
     const cid = conversationId.trim();
     const clid = callId.trim();
 
     const STEPS = [
-      { id: 'read_files', label: `Reading ${uploadedFiles.length} uploaded log file(s)`, status: 'pending', detail: null },
       { id: 'filter_engine', label: 'Filtering Engine Logs by Conversation ID', status: 'pending', detail: null },
       { id: 'filter_evg', label: clid ? 'Filtering EVG Logs by Call ID' : 'Auto-discovering Call ID from Engine Logs → Filtering EVG Logs', status: 'pending', detail: null },
       { id: 'combine', label: 'Combining Engine + EVG results into unified timeline', status: 'pending', detail: null },
@@ -1774,20 +2012,8 @@ function Page1({ config, onOpenSettings }) {
     setPipelineSteps(STEPS);
 
     try {
-      // Step 1: Read all files
-      updateStep('read_files', 'running');
-      const allParsedEntries = [];
-      let totalLines = 0;
-      let totalBytes = 0;
-
-      for (const uf of uploadedFiles) {
-        const text = await uf.file.text();
-        totalBytes += uf.file.size;
-        const entries = parseLogFile(text, uf.file.name);
-        totalLines += text.split('\n').length;
-        allParsedEntries.push(...entries);
-      }
-      updateStep('read_files', 'done', `Parsed ${allParsedEntries.length.toLocaleString()} log entries from ${uploadedFiles.length} files (${formatBytes(totalBytes)}, ${totalLines.toLocaleString()} lines)`);
+      // Use pre-extracted flat data — no re-parsing needed
+      const allParsedEntries = extractedData.entries;
 
       // Step 2a: Filter Engine Logs by Conversation ID
       let engineFiltered = [];
@@ -1934,7 +2160,7 @@ function Page1({ config, onOpenSettings }) {
         }
 
         if (explicitValues.length > 0) {
-          const maxVal = Math.max(...explicitValues);
+          const maxVal = explicitValues.reduce((a, b) => a > b ? a : b);
           const avgVal = explicitValues.reduce((s, v) => s + v, 0) / explicitValues.length;
           const detail = s.key === 'api' && apiPairLatencies.length > 0
             ? `${apiPairLatencies.length} API calls: ${apiPairLatencies.map(p => p.service + '=' + Math.round(p.latencyMs) + 'ms').join(', ')}`
@@ -2002,7 +2228,7 @@ function Page1({ config, onOpenSettings }) {
           const computed = computedStageLatencies[lat.key];
           if (computed && computed.values.length > 0 && lat.ms === 0) {
             // Stage had no explicit log-message latency but we have computed values from flow
-            const maxVal = Math.max(...computed.values);
+            const maxVal = computed.values.reduce((a, b) => a > b ? a : b);
             const avgVal = computed.values.reduce((s, v) => s + v, 0) / computed.values.length;
             const detailStr = typeof computed.detail === 'function' ? computed.detail() : null;
             latencies[idx] = {
@@ -2027,7 +2253,17 @@ function Page1({ config, onOpenSettings }) {
       updateStep('classify', 'done', `${allTurns.length} conversation turns mapped (avg turn latency: ${turnStats.systemAvgMs}ms), ${latencies.length} stages classified (${uncatCount} uncategorized)`);
 
       if (allTurns.length === 0 && latencies.length === 0) {
-        setError(`Found ${filtered.length} matching logs but couldn't map conversation turns or extract stage latencies. Ensure both EVG and Engine logs are uploaded with correct IDs.`);
+        const diagParts = [`Found ${filtered.length} matching logs (${engineFiltered.length} Engine + ${evgFiltered.length} EVG) but couldn't map conversation turns or extract stage latencies.`];
+        if (engineFiltered.length > 0 && evgFiltered.length === 0) {
+          diagParts.push('No EVG logs matched — the Call ID may not exist in the EVG file, or EVG logs are missing.');
+        }
+        if (engineFiltered.length === 0 && evgFiltered.length > 0) {
+          diagParts.push('No Engine logs matched — check the Conversation ID is correct.');
+        }
+        if (engineFiltered.length > 0 && engineFiltered.length < 10) {
+          diagParts.push(`Only ${engineFiltered.length} Engine entries matched — this conversation may be very short or the ID may be partial. Available IDs with high match counts: ${(extractedData?.summary?.convIdList || []).slice(0, 5).map(c => c.id + ' (' + c.count + ')').join(', ')}`);
+        }
+        setError(diagParts.join(' '));
         setLoading(false); return;
       }
 
@@ -2037,7 +2273,7 @@ function Page1({ config, onOpenSettings }) {
         try { return new Date(e.ts).getTime(); } catch(err) { return NaN; }
       }).filter(t => !isNaN(t));
       const totalConvDuration = allFilteredTimes.length >= 2
-        ? Math.max(...allFilteredTimes) - Math.min(...allFilteredTimes)
+        ? allFilteredTimes.reduce((mx, v) => v > mx ? v : mx, allFilteredTimes[0]) - allFilteredTimes.reduce((mn, v) => v < mn ? v : mn, allFilteredTimes[0])
         : (turnStats?.totalDurationMs || 0);
 
       const total = latencies.reduce((s, l) => s + l.ms, 0);
@@ -2088,36 +2324,124 @@ function Page1({ config, onOpenSettings }) {
   };
 
   const hasAtLeastOneId = conversationId.trim() || callId.trim();
-  const canAnalyze = hasAtLeastOneId && uploadedFiles.length > 0 && !loading;
+  const canExtract = uploadedFiles.length > 0 && !extracting && !loading;
+  const canAnalyze = hasAtLeastOneId && extractedData && !loading;
 
   return (
     <div>
       <div className="page-header">
         <div className="page-title">Troubleshoot Conversation Latency</div>
-        <div className="page-subtitle">Upload log files and provide the Conversation ID — the Call ID is auto-discovered from Engine logs. You can also enter the Call ID manually.</div>
+        <div className="page-subtitle">Upload log files, click Extract to build a flat structure, then enter the Conversation ID and Analyze.</div>
       </div>
       <div className="page-body">
+
+        {/* ── STEP 1: Upload Files ── */}
         <FileUploadZone files={uploadedFiles} onFilesAdded={onFilesAdded} onRemoveFile={onRemoveFile} />
 
-        <div className="search-section">
-          <div className="input-group">
-            <div className="input-label">Conversation ID <span style={{opacity:0.5,textTransform:'none',fontWeight:400}}>(Engine Logs)</span></div>
-            <input className="input-field" value={conversationId} onChange={e => setConversationId(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && canAnalyze && handleAnalyze()}
-              placeholder="Used to search Engine Logs" />
+        {/* ── STEP 2: Extract ── */}
+        {uploadedFiles.length > 0 && !extractedData && (
+          <div style={{display:'flex',alignItems:'center',gap:16,marginBottom:20}}>
+            <button className="btn-primary" onClick={handleExtract} disabled={!canExtract}
+              style={{minWidth:180,background:'linear-gradient(135deg,#3b82f6,#06b6d4)'}}>
+              {extracting ? <><div className="spinner"></div> Extracting...</> : <>&#9881; Extract &amp; Normalize</>}
+            </button>
+            <span style={{fontSize:12,color:'var(--text-muted)'}}>
+              Parses all uploaded files into a normalized flat structure (handles CRLF, ghost columns, epoch→UTC)
+            </span>
           </div>
-          <div className="input-group">
-            <div className="input-label">Call ID <span style={{opacity:0.5,textTransform:'none',fontWeight:400}}>(EVG Logs — auto-discovered if blank)</span></div>
-            <input className="input-field" value={callId} onChange={e => setCallId(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && canAnalyze && handleAnalyze()}
-              placeholder="Optional — auto-discovered from Engine initAttribs" />
-          </div>
-          <button className="btn-primary" onClick={handleAnalyze} disabled={!canAnalyze}>
-            {loading ? <><div className="spinner"></div> Processing...</> : 'Analyze Logs'}
-          </button>
-        </div>
+        )}
 
-        {!config.openaiApiKey && (
+        {/* Extract pipeline progress */}
+        {extracting && extractPipeline.length > 0 && <ProcessingPipeline steps={extractPipeline} />}
+
+        {/* ── Extraction Summary Card ── */}
+        {extractedData && (
+          <div className="card" style={{borderColor:'rgba(16,185,129,0.3)',marginBottom:20,background:'linear-gradient(135deg,rgba(16,185,129,0.04),rgba(6,182,212,0.04))'}}>
+            <div className="card-header" style={{borderBottom:'1px solid rgba(16,185,129,0.15)'}}>
+              <div className="card-title" style={{color:'var(--accent-green)',display:'flex',alignItems:'center',gap:8}}>
+                <span>&#9989;</span> Extraction Complete — Flat Structure Ready
+              </div>
+              <button onClick={() => { setExtractedData(null); setResults(null); setAiAnalysis(null); }}
+                style={{fontSize:11,color:'var(--text-muted)',background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.1)',borderRadius:6,padding:'4px 12px',cursor:'pointer'}}>
+                Re-Extract
+              </button>
+            </div>
+            <div className="card-body" style={{padding:'14px 20px'}}>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(150px, 1fr))',gap:12,marginBottom:12}}>
+                <div><div style={{fontSize:11,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:1}}>Total Entries</div>
+                  <div style={{fontSize:20,fontWeight:700,color:'var(--text-primary)'}}>{extractedData.summary.totalEntries.toLocaleString()}</div></div>
+                <div><div style={{fontSize:11,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:1}}>Engine Logs</div>
+                  <div style={{fontSize:20,fontWeight:700,color:'var(--accent-blue)'}}>{extractedData.summary.engineCount.toLocaleString()}</div></div>
+                <div><div style={{fontSize:11,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:1}}>EVG Logs</div>
+                  <div style={{fontSize:20,fontWeight:700,color:'var(--accent-cyan)'}}>{extractedData.summary.evgCount.toLocaleString()}</div></div>
+                <div><div style={{fontSize:11,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:1}}>Conversation IDs</div>
+                  <div style={{fontSize:20,fontWeight:700,color:'var(--accent-purple)'}}>{extractedData.summary.convIdCount.toLocaleString()}</div></div>
+                <div><div style={{fontSize:11,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:1}}>Call IDs</div>
+                  <div style={{fontSize:20,fontWeight:700,color:'var(--accent-green)'}}>{extractedData.summary.callIdCount.toLocaleString()}</div></div>
+              </div>
+              {/* Per-file breakdown */}
+              <div style={{fontSize:12,color:'var(--text-secondary)',lineHeight:1.8}}>
+                {extractedData.summary.perFile.map((f, i) => (
+                  <div key={i} style={{display:'flex',gap:8,alignItems:'center'}}>
+                    <span style={{color: f.source === 'engine' ? 'var(--accent-blue)' : f.source === 'evg' ? 'var(--accent-cyan)' : 'var(--text-muted)',fontWeight:600,fontSize:10,textTransform:'uppercase',minWidth:50}}>{f.source}</span>
+                    <span style={{fontFamily:'monospace',fontSize:11}}>{f.name}</span>
+                    <span style={{opacity:0.5}}>— {f.entries.toLocaleString()} entries ({formatBytes(f.size)})</span>
+                  </div>
+                ))}
+              </div>
+              {/* Normalization stats */}
+              <div style={{marginTop:10,fontSize:11,color:'var(--text-muted)',display:'flex',gap:16,flexWrap:'wrap'}}>
+                {extractedData.summary.crlfFixed > 0 && <span>&#128295; {extractedData.summary.crlfFixed} CRLF cleaned</span>}
+                {extractedData.summary.epochConverted > 0 && <span>&#128336; {extractedData.summary.epochConverted} epoch→UTC</span>}
+                {extractedData.summary.blankEntriesDropped > 0 && <span>&#128465; {extractedData.summary.blankEntriesDropped} blank entries dropped</span>}
+                {extractedData.summary.minTs && <span>&#128197; {extractedData.summary.minTs.substring(0,19)}Z → {extractedData.summary.maxTs.substring(0,19)}Z</span>}
+              </div>
+              {/* Discovered Conversation IDs — click to select */}
+              {extractedData.summary.convIdList && extractedData.summary.convIdList.length > 0 && (
+                <div style={{marginTop:14,borderTop:'1px solid rgba(255,255,255,0.06)',paddingTop:12}}>
+                  <div style={{fontSize:11,color:'var(--text-muted)',textTransform:'uppercase',letterSpacing:1,marginBottom:8}}>Discovered Conversation IDs (click to select)</div>
+                  <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+                    {extractedData.summary.convIdList.map((c, i) => (
+                      <button key={i} onClick={() => setConversationId(c.id)}
+                        style={{
+                          background: conversationId === c.id ? 'rgba(59,130,246,0.25)' : 'rgba(255,255,255,0.04)',
+                          border: conversationId === c.id ? '1px solid rgba(59,130,246,0.5)' : '1px solid rgba(255,255,255,0.08)',
+                          borderRadius:6, padding:'5px 10px', cursor:'pointer', fontSize:11, fontFamily:'monospace',
+                          color: conversationId === c.id ? 'var(--accent-blue)' : 'var(--text-secondary)',
+                          transition:'all 0.15s ease',
+                        }}>
+                        {c.id} <span style={{opacity:0.5,fontSize:10,fontFamily:'sans-serif'}}>({c.count})</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── STEP 3 & 4: Conversation ID + Analyze (only after extraction) ── */}
+        {extractedData && (
+          <div className="search-section">
+            <div className="input-group">
+              <div className="input-label">Conversation ID <span style={{opacity:0.5,textTransform:'none',fontWeight:400}}>(Engine Logs)</span></div>
+              <input className="input-field" value={conversationId} onChange={e => setConversationId(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && canAnalyze && handleAnalyze()}
+                placeholder="Used to search Engine Logs" />
+            </div>
+            <div className="input-group">
+              <div className="input-label">Call ID <span style={{opacity:0.5,textTransform:'none',fontWeight:400}}>(EVG Logs — auto-discovered if blank)</span></div>
+              <input className="input-field" value={callId} onChange={e => setCallId(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && canAnalyze && handleAnalyze()}
+                placeholder="Optional — auto-discovered from Engine initAttribs" />
+            </div>
+            <button className="btn-primary" onClick={handleAnalyze} disabled={!canAnalyze}>
+              {loading ? <><div className="spinner"></div> Analyzing...</> : 'Analyze Conversation'}
+            </button>
+          </div>
+        )}
+
+        {!config.openaiApiKey && extractedData && (
           <div className="card" style={{borderColor:'rgba(139,92,246,0.3)',marginBottom:20}}>
             <div className="card-body" style={{display:'flex',alignItems:'center',gap:16,flexWrap:'wrap'}}>
               <div style={{flex:1,minWidth:200}}>
@@ -2258,6 +2582,8 @@ function Page1({ config, onOpenSettings }) {
           </div>
         )}
       </div>
+      {/* Floating Chatbot — visible when analysis results are loaded */}
+      {results && <AnalysisChatbot config={config} results={results} aiAnalysis={aiAnalysis} />}
     </div>
   );
 }
@@ -2279,7 +2605,7 @@ function Page2({ config }) {
   const handleSort = (c) => { if (sortBy===c) setSortDir(d=>d==='desc'?'asc':'desc'); else { setSortBy(c); setSortDir('desc'); } };
   const getLC = (ms) => ms<500?'latency-good':ms<1500?'latency-moderate':'latency-bad';
   const getLBC = (ms) => ms<500?'var(--accent-green)':ms<1500?'var(--accent-yellow)':'var(--accent-red)';
-  const maxP99 = Math.max(...clients.map(c=>c.p99),1);
+  const maxP99 = clients.reduce((mx, c) => c.p99 > mx ? c.p99 : mx, 1);
   const stBadge = (s) => { const m={healthy:'badge-green',degraded:'badge-yellow',down:'badge-red'}; return <span className={`badge ${m[s]||'badge-green'}`}><span className="badge-dot"></span> {s}</span>; };
 
   return (
@@ -2343,6 +2669,212 @@ function Page2({ config }) {
 
 
 // ═══════════════════════════════════════════════
+// AGENTIC CHATBOT — Log Analyst
+// ═══════════════════════════════════════════════
+
+function AnalysisChatbot({ config, results, aiAnalysis }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
+  const [isStreaming, setIsStreaming] = useState(false);
+  const messagesEndRef = useRef(null);
+
+  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+
+  const buildSystemPrompt = () => {
+    if (!results) return 'No analysis results loaded yet.';
+    const stats = results.turnStats || {};
+    const turns = results.turns || [];
+    let p = `You are an expert Amelia voice AI latency analyst chatbot. Answer questions about this conversation's latency data with precision — reference turn numbers, timestamps, latency values, task types, and component names. When asked about specific turns, provide the full 6-bucket breakdown. You can also reference raw engine log entries to provide deeper root-cause insights.
+
+=== ANALYSIS SUMMARY ===
+Turn Count: ${stats.turnCount || turns.length}
+Average System Latency: ${stats.systemAvgMs || 'N/A'} ms
+Worst Turn Latency: ${stats.systemWorstMs || 'N/A'} ms (Turn ${stats.systemWorstTurn || 'N/A'})
+P95 Latency: ${stats.systemP95Ms || 'N/A'} ms | Median: ${stats.systemMedianMs || 'N/A'} ms
+Average LLM: ${stats.llmAvgMs || 0} ms | Average TTS: ${stats.ttsAvgMs || 0} ms | Average STT: ${stats.sttAvgMs || 0} ms
+Engine avg: ${stats.engineAvgMs || 0} ms
+
+=== PER-TURN BREAKDOWN ===`;
+    for (const t of turns.slice(0, 25)) {
+      p += `\nTurn ${t.turnNumber}: Total=${t.totalTurnMs}ms [STT=${t.b_stt}ms TTS=${t.b_tts}ms EVG=${t.b_evg}ms LLM=${t.b_llm}ms API=${t.b_api}ms Engine=${t.b_engine}ms]`;
+      p += `\n  User: "${(t.userText||'').substring(0,80)}" → Amelia: "${(t.ameliaText||'').substring(0,80)}"`;
+      if (t.llmCalls?.length > 0) p += `\n  LLM Calls: ${t.llmCalls.map(c => c.taskType + '=' + Math.round(c.latencyMs) + 'ms').join(', ')}`;
+      if (t.apiCalls?.length > 0) p += `\n  API Calls: ${t.apiCalls.map(a => (a.service||'api') + '=' + Math.round(a.latencyMs) + 'ms').join(', ')}`;
+      if (t.engineSubBreakdown?.length > 0) p += `\n  Engine Sub: ${t.engineSubBreakdown.map(s => s.label + '(' + s.count + ' logs, ' + (s.spanMs||0) + 'ms span)').join(', ')}`;
+    }
+    // Engine logs sample
+    const eLogs = results.engineLogs || [];
+    if (eLogs.length > 0) {
+      p += `\n\n=== ENGINE LOG SAMPLE (${Math.min(eLogs.length,80)} of ${eLogs.length} entries) ===`;
+      for (const log of eLogs.slice(0, 80)) p += `\n[${log.level||'INFO'}] ${(log.ts||'').substring(11,23)} ${(log.msg||'').substring(0,140)}`;
+    }
+    // EVG logs sample
+    const vLogs = results.evgLogs || [];
+    if (vLogs.length > 0) {
+      p += `\n\n=== EVG LOG SAMPLE (${Math.min(vLogs.length,40)} of ${vLogs.length} entries) ===`;
+      for (const log of vLogs.slice(0, 40)) p += `\n${(log.ts||'').substring(11,23)} ${(log.msg||'').substring(0,120)}`;
+    }
+    if (aiAnalysis) p += `\n\n=== PREVIOUS AI ANALYSIS ===\n${aiAnalysis}`;
+    return p;
+  };
+
+  const handleSend = async (text) => {
+    const userMsg = (text || input).trim();
+    if (!userMsg || isStreaming) return;
+    if (!config?.openaiApiKey) {
+      setMessages(prev => [...prev, { role: 'user', content: userMsg }, { role: 'assistant', content: 'Please configure an OpenAI API key in Settings to use the chatbot.' }]);
+      setInput('');
+      return;
+    }
+    const newMessages = [...messages, { role: 'user', content: userMsg }];
+    setMessages([...newMessages, { role: 'assistant', content: '' }]);
+    setInput('');
+    setIsStreaming(true);
+    try {
+      const sysPrompt = buildSystemPrompt();
+      const apiMessages = [{ role: 'system', content: sysPrompt }, ...newMessages.slice(-12).map(m => ({ role: m.role, content: m.content }))];
+      const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${config.openaiApiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: config.openaiModel || 'gpt-4o-mini', messages: apiMessages, temperature: 0.3, max_tokens: 2000, stream: true }),
+      });
+      if (!resp.ok) throw new Error(`API error: ${resp.status} ${resp.statusText}`);
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let accum = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value);
+        for (const line of chunk.split('\n').filter(l => l.trim().startsWith('data: '))) {
+          const data = line.slice(6).trim();
+          if (data === '[DONE]') break;
+          try {
+            const delta = JSON.parse(data).choices?.[0]?.delta?.content || '';
+            if (delta) { accum += delta; setMessages(prev => { const u = [...prev]; u[u.length-1] = { role: 'assistant', content: accum }; return u; }); }
+          } catch(e) {}
+        }
+      }
+    } catch (err) {
+      setMessages(prev => { const u = [...prev]; u[u.length-1] = { role: 'assistant', content: `Error: ${err.message}` }; return u; });
+    } finally { setIsStreaming(false); }
+  };
+
+  const starterQs = ["What's causing the slowest turn?", "Break down LLM latencies by task type", "Which turns need optimization?", "Summarize the call flow"];
+
+  const renderMd = (content) => (content||'').split('\n').map((line, i) => {
+    // Bold
+    let parts = [];
+    let last = 0;
+    const bRe = /\*\*(.*?)\*\*/g;
+    let m;
+    while ((m = bRe.exec(line)) !== null) { parts.push(line.substring(last, m.index)); parts.push(<strong key={'b'+i+m.index}>{m[1]}</strong>); last = m.index + m[0].length; }
+    parts.push(line.substring(last));
+    // Inline code
+    const finalParts = [];
+    for (const part of parts) {
+      if (typeof part !== 'string') { finalParts.push(part); continue; }
+      let codeLast = 0;
+      const cRe = /`([^`]+)`/g;
+      let cm;
+      while ((cm = cRe.exec(part)) !== null) { finalParts.push(part.substring(codeLast, cm.index)); finalParts.push(<code key={'c'+i+cm.index} style={{background:'#141525',padding:'1px 5px',borderRadius:3,fontFamily:'monospace',fontSize:'0.9em'}}>{cm[1]}</code>); codeLast = cm.index + cm[0].length; }
+      finalParts.push(part.substring(codeLast));
+    }
+    if (line.trim().startsWith('- ') || line.trim().startsWith('• ') || /^\d+\.\s/.test(line.trim())) return <div key={i} style={{paddingLeft:12}}>{finalParts}</div>;
+    return <div key={i}>{finalParts}</div>;
+  });
+
+  return (
+    <div style={{position:'fixed',bottom:20,right:20,zIndex:9999}}>
+      {/* Toggle Button */}
+      <button onClick={()=>setIsOpen(!isOpen)} style={{
+        width:56,height:56,borderRadius:'50%',border:'none',
+        background: isOpen ? '#252640' : 'linear-gradient(135deg, #8b5cf6, #6d28d9)',
+        color:'#fff',fontSize:isOpen?20:24,cursor:'pointer',
+        display:'flex',alignItems:'center',justifyContent:'center',
+        boxShadow: isOpen ? 'none' : '0 4px 16px rgba(139,92,246,0.5)',
+        transition:'all 0.3s'
+      }}>{isOpen ? '\u2715' : '\uD83D\uDCAC'}</button>
+
+      {/* Chat Panel */}
+      {isOpen && (
+        <div style={{
+          position:'absolute',bottom:70,right:0,width:440,height:540,
+          background:'#1a1b2e',border:'1px solid rgba(139,92,246,0.3)',borderRadius:12,
+          display:'flex',flexDirection:'column',boxShadow:'0 10px 40px rgba(0,0,0,0.5)',overflow:'hidden'
+        }}>
+          {/* Header */}
+          <div style={{padding:'14px 16px',borderBottom:'1px solid rgba(139,92,246,0.15)',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <div style={{display:'flex',alignItems:'center',gap:8}}>
+              <span style={{fontSize:15,fontWeight:600,color:'#e2e8f0'}}>Log Analyst</span>
+              <span style={{fontSize:9,padding:'2px 6px',background:'rgba(139,92,246,0.2)',borderRadius:3,color:'#a78bfa',fontWeight:600}}>AI</span>
+            </div>
+            <button onClick={()=>setIsOpen(false)} style={{background:'none',border:'none',color:'#94a3b8',cursor:'pointer',fontSize:18}}>{'\u2715'}</button>
+          </div>
+
+          {/* Messages */}
+          <div style={{flex:1,overflowY:'auto',padding:16,display:'flex',flexDirection:'column',gap:10}}>
+            {messages.length === 0 ? (
+              <div style={{textAlign:'center',marginTop:16}}>
+                <div style={{fontSize:36,marginBottom:8}}>&#129302;</div>
+                <div style={{fontSize:13,color:'#94a3b8',marginBottom:16}}>Ask me anything about the latency analysis</div>
+                <div style={{display:'flex',flexDirection:'column',gap:8}}>
+                  {starterQs.map(q => (
+                    <button key={q} onClick={() => handleSend(q)} style={{
+                      padding:'10px 12px',background:'rgba(139,92,246,0.08)',border:'1px solid rgba(139,92,246,0.25)',
+                      borderRadius:6,color:'#a78bfa',cursor:'pointer',fontSize:12,textAlign:'left',transition:'all 0.2s'
+                    }}>{q}</button>
+                  ))}
+                </div>
+              </div>
+            ) : messages.map((msg, idx) => (
+              <div key={idx} style={{display:'flex',justifyContent: msg.role==='user' ? 'flex-end' : 'flex-start'}}>
+                <div style={{
+                  maxWidth:'85%',padding:'10px 14px',borderRadius: msg.role==='user' ? '12px 12px 2px 12px' : '12px 12px 12px 2px',
+                  background: msg.role==='user' ? 'linear-gradient(135deg, #8b5cf6, #6d28d9)' : '#252640',
+                  color:'#e2e8f0',fontSize:13,lineHeight:1.5,wordBreak:'break-word'
+                }}>
+                  {msg.role === 'assistant' && msg.content === '' && isStreaming ? (
+                    <div style={{display:'flex',gap:4,alignItems:'center',padding:'4px 0'}}>
+                      <span className="chat-dot" style={{animationDelay:'0s'}}></span>
+                      <span className="chat-dot" style={{animationDelay:'0.2s'}}></span>
+                      <span className="chat-dot" style={{animationDelay:'0.4s'}}></span>
+                    </div>
+                  ) : msg.role === 'assistant' ? renderMd(msg.content) : msg.content}
+                </div>
+              </div>
+            ))}
+            <div ref={messagesEndRef}/>
+          </div>
+
+          {/* Input */}
+          <div style={{padding:'10px 12px',borderTop:'1px solid rgba(139,92,246,0.15)',display:'flex',gap:8}}>
+            <input type="text" value={input} onChange={e => setInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && !isStreaming) handleSend(); }}
+              placeholder="Ask about latencies, turns, logs..."
+              disabled={isStreaming}
+              style={{flex:1,padding:'10px 12px',background:'#141525',border:'1px solid rgba(139,92,246,0.2)',
+                borderRadius:6,color:'#e2e8f0',fontSize:13,outline:'none',opacity:isStreaming?0.5:1}} />
+            <button onClick={()=>handleSend()} disabled={isStreaming||!input.trim()} style={{
+              padding:'10px 16px',background:'#8b5cf6',border:'none',borderRadius:6,
+              color:'#fff',cursor: isStreaming||!input.trim() ? 'not-allowed' : 'pointer',
+              fontSize:13,fontWeight:500,opacity: isStreaming||!input.trim() ? 0.4 : 1,transition:'all 0.2s'
+            }}>Send</button>
+          </div>
+
+          <style>{`
+            .chat-dot { width:6px; height:6px; background:rgba(139,92,246,0.6); border-radius:50%; animation: chatPulse 1.4s infinite; }
+            @keyframes chatPulse { 0%,60%,100% { opacity:0.3; } 30% { opacity:1; } }
+          `}</style>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ═══════════════════════════════════════════════
 // APP
 // ═══════════════════════════════════════════════
 function App() {
@@ -2352,7 +2884,7 @@ function App() {
   return (
     <div className="app-container">
       <div className="sidebar">
-        <div className="sidebar-logo"><div className="logo-icon">A</div><div><div className="logo-text">Amelia Latency</div><div className="logo-sub">Analyser</div></div></div>
+        <div className="sidebar-logo"><div className="logo-icon">A</div><div><div className="logo-text">Amelia Latency</div><div className="logo-sub">Analyser <span style={{fontSize:9,opacity:0.5}}>v2.1</span></div></div></div>
         <div className="sidebar-nav">
           <div className={`nav-item ${page===1?'active':''}`} onClick={()=>setPage(1)}><span className="nav-icon">&#128269;</span><span>Troubleshoot</span></div>
           <div className={`nav-item ${page===2?'active':''}`} onClick={()=>setPage(2)}><span className="nav-icon">&#128225;</span><span>Client Monitoring</span></div>
