@@ -1,0 +1,2048 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Amelia Latency Analyser</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<style>
+  :root {
+    --bg-primary: #0f1117; --bg-secondary: #1a1d2e; --bg-card: #1e2235;
+    --bg-input: #252a3a; --border: #2d3348; --text-primary: #e8eaed;
+    --text-secondary: #9aa0b4; --text-muted: #6b7280; --accent-blue: #3b82f6;
+    --accent-blue-hover: #2563eb; --accent-green: #10b981; --accent-yellow: #f59e0b;
+    --accent-red: #ef4444; --accent-purple: #8b5cf6; --accent-cyan: #06b6d4;
+    --accent-orange: #f97316;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg-primary); color: var(--text-primary); min-height: 100vh; }
+  .app-container { display: flex; min-height: 100vh; }
+
+  .sidebar { width: 260px; background: var(--bg-secondary); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; }
+  .sidebar-logo { padding: 24px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+  .logo-icon { width: 36px; height: 36px; background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple)); border-radius: 10px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 16px; color: white; }
+  .logo-text { font-size: 17px; font-weight: 600; } .logo-sub { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+  .sidebar-nav { padding: 16px 12px; flex: 1; }
+  .nav-item { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 10px; cursor: pointer; transition: all 0.15s; margin-bottom: 4px; font-size: 14px; color: var(--text-secondary); border: 1px solid transparent; }
+  .nav-item:hover { background: var(--bg-input); color: var(--text-primary); }
+  .nav-item.active { background: rgba(59,130,246,0.12); color: var(--accent-blue); border-color: rgba(59,130,246,0.2); }
+  .nav-icon { font-size: 18px; width: 24px; text-align: center; }
+  .sidebar-config { padding: 16px; border-top: 1px solid var(--border); }
+  .config-btn { width: 100%; padding: 10px 14px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; color: var(--text-secondary); font-size: 13px; cursor: pointer; display: flex; align-items: center; gap: 8px; transition: all 0.15s; }
+  .config-btn:hover { border-color: var(--accent-blue); color: var(--text-primary); }
+
+  .main-content { flex: 1; overflow-y: auto; }
+  .page-header { padding: 28px 36px 20px; border-bottom: 1px solid var(--border); background: var(--bg-secondary); }
+  .page-title { font-size: 22px; font-weight: 600; } .page-subtitle { font-size: 13px; color: var(--text-muted); margin-top: 6px; }
+  .page-body { padding: 28px 36px; }
+
+  .search-section { display: flex; gap: 12px; align-items: flex-end; margin-bottom: 20px; }
+  .input-group { flex: 1; } .input-label { font-size: 12px; font-weight: 500; color: var(--text-muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .input-field { width: 100%; padding: 11px 16px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 10px; color: var(--text-primary); font-size: 14px; outline: none; transition: border-color 0.15s; }
+  .input-field:focus { border-color: var(--accent-blue); } .input-field::placeholder { color: var(--text-muted); }
+  .btn-primary { padding: 11px 24px; background: var(--accent-blue); border: none; border-radius: 10px; color: white; font-size: 14px; font-weight: 500; cursor: pointer; transition: background 0.15s; white-space: nowrap; display: flex; align-items: center; gap: 8px; }
+  .btn-primary:hover { background: var(--accent-blue-hover); } .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-secondary { padding: 9px 18px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; color: var(--text-secondary); font-size: 13px; cursor: pointer; }
+  .btn-secondary:hover { border-color: var(--text-muted); }
+  .btn-danger { padding: 5px 12px; background: transparent; border: 1px solid rgba(239,68,68,0.3); border-radius: 6px; color: var(--accent-red); font-size: 11px; cursor: pointer; }
+  .btn-danger:hover { background: rgba(239,68,68,0.1); }
+
+  .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; margin-bottom: 20px; overflow: hidden; }
+  .card-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  .card-title { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .card-body { padding: 20px; }
+
+  /* ── File Upload ── */
+  .upload-zone { border: 2px dashed var(--border); border-radius: 14px; padding: 36px 24px; text-align: center; cursor: pointer; transition: all 0.2s; margin-bottom: 20px; position: relative; }
+  .upload-zone:hover, .upload-zone.drag-over { border-color: var(--accent-blue); background: rgba(59,130,246,0.04); }
+  .upload-zone.drag-over { border-color: var(--accent-blue); background: rgba(59,130,246,0.08); }
+  .upload-zone-icon { font-size: 40px; margin-bottom: 12px; opacity: 0.5; }
+  .upload-zone-title { font-size: 15px; font-weight: 500; color: var(--text-secondary); margin-bottom: 6px; }
+  .upload-zone-desc { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+  .upload-zone input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  .upload-zone-formats { display: flex; gap: 6px; justify-content: center; margin-top: 12px; flex-wrap: wrap; }
+  .format-tag { padding: 3px 10px; background: var(--bg-input); border-radius: 20px; font-size: 11px; color: var(--text-muted); font-family: monospace; }
+
+  .uploaded-files { margin-bottom: 20px; }
+  .file-chip { display: inline-flex; align-items: center; gap: 8px; padding: 7px 14px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; font-size: 12px; margin: 0 6px 6px 0; }
+  .file-chip-name { color: var(--text-primary); font-weight: 500; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-chip-size { color: var(--text-muted); }
+  .file-chip-source { padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; text-transform: uppercase; }
+  .file-chip-source.engine { background: rgba(59,130,246,0.15); color: var(--accent-blue); }
+  .file-chip-source.evg { background: rgba(139,92,246,0.15); color: var(--accent-purple); }
+  .file-chip-source.unknown { background: rgba(107,114,128,0.15); color: var(--text-muted); }
+  .file-chip-remove { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1; }
+  .file-chip-remove:hover { color: var(--accent-red); }
+
+  /* ── Waterfall ── */
+  .waterfall-container { position: relative; }
+  .waterfall-row { display: flex; align-items: center; gap: 12px; padding: 0; border-bottom: 1px solid rgba(45,51,72,0.5); cursor: pointer; transition: background 0.12s; }
+  .waterfall-row:last-child { border-bottom: none; }
+  .waterfall-row:hover { background: rgba(59,130,246,0.04); }
+  .waterfall-row-inner { display: flex; align-items: center; gap: 12px; padding: 10px 0; width: 100%; }
+  .waterfall-row.active { background: rgba(59,130,246,0.06); }
+  .waterfall-row.worst-turn { background: rgba(239,68,68,0.06); border-left: 3px solid var(--accent-red); }
+  .waterfall-row.worst-turn:hover { background: rgba(239,68,68,0.1); }
+  .waterfall-label { width: 180px; flex-shrink: 0; font-size: 13px; color: var(--text-secondary); text-align: right; padding-right: 12px; }
+  .waterfall-bar-container { flex: 1; height: 32px; position: relative; background: rgba(45,51,72,0.3); border-radius: 6px; overflow: hidden; }
+  .waterfall-bar { height: 100%; border-radius: 6px; display: flex; align-items: center; padding: 0 10px; font-size: 12px; font-weight: 600; color: white; min-width: 50px; transition: width 0.6s ease; }
+  .waterfall-bar.normal { background: linear-gradient(90deg, #10b981, #059669); }
+  .waterfall-bar.warning { background: linear-gradient(90deg, #f59e0b, #d97706); }
+  .waterfall-bar.critical { background: linear-gradient(90deg, #ef4444, #dc2626); }
+  .waterfall-value { width: 80px; flex-shrink: 0; font-size: 13px; font-weight: 600; text-align: right; }
+  .waterfall-value.normal { color: var(--accent-green); } .waterfall-value.warning { color: var(--accent-yellow); } .waterfall-value.critical { color: var(--accent-red); }
+  .waterfall-click-hint { width: 30px; flex-shrink: 0; text-align: center; font-size: 14px; color: var(--text-muted); transition: all 0.15s; }
+  .waterfall-row:hover .waterfall-click-hint { color: var(--accent-blue); }
+
+  .stage-log-drawer { background: rgba(15,17,23,0.5); border-top: 1px solid var(--border); padding: 14px 16px 14px 200px; animation: slideDown 0.2s ease; }
+  @keyframes slideDown { from { opacity: 0; max-height: 0; } to { opacity: 1; max-height: 800px; } }
+  .stage-log-drawer-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  .stage-log-drawer-title { font-size: 12px; font-weight: 600; color: var(--accent-cyan); text-transform: uppercase; letter-spacing: 0.4px; }
+  .stage-log-count { font-size: 11px; color: var(--text-muted); }
+  .stage-log-drawer .log-entry { font-size: 11px; padding: 6px 10px; }
+  .stage-log-empty { font-size: 12px; color: var(--text-muted); font-style: italic; padding: 8px 0; }
+
+  .badge { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; }
+  .badge-green { background: rgba(16,185,129,0.15); color: var(--accent-green); }
+  .badge-yellow { background: rgba(245,158,11,0.15); color: var(--accent-yellow); }
+  .badge-red { background: rgba(239,68,68,0.15); color: var(--accent-red); }
+  .badge-dot { width: 6px; height: 6px; border-radius: 50%; }
+  .badge-green .badge-dot { background: var(--accent-green); } .badge-yellow .badge-dot { background: var(--accent-yellow); } .badge-red .badge-dot { background: var(--accent-red); }
+
+  .ai-analysis { background: linear-gradient(135deg, rgba(139,92,246,0.08), rgba(59,130,246,0.08)); border: 1px solid rgba(139,92,246,0.2); border-radius: 12px; padding: 20px; }
+  .ai-header { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; font-size: 14px; font-weight: 600; color: var(--accent-purple); }
+  .ai-content { font-size: 13px; line-height: 1.7; color: var(--text-secondary); }
+  .ai-content strong { color: var(--text-primary); } .ai-content ul { margin: 8px 0 8px 20px; } .ai-content li { margin: 4px 0; }
+
+  .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+  .stat-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
+  .stat-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+  .stat-value { font-size: 26px; font-weight: 700; } .stat-sub { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; backdrop-filter: blur(4px); }
+  .modal { background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; width: 520px; max-height: 80vh; overflow-y: auto; }
+  .modal-header { padding: 20px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  .modal-title { font-size: 16px; font-weight: 600; }
+  .modal-close { width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--text-muted); cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; }
+  .modal-close:hover { border-color: var(--accent-red); color: var(--accent-red); }
+  .modal-body { padding: 24px; } .form-group { margin-bottom: 18px; } .form-label { font-size: 13px; font-weight: 500; margin-bottom: 6px; display: block; }
+  .form-help { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+  .modal-footer { padding: 16px 24px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; }
+
+  .spinner { width: 20px; height: 20px; border: 2px solid rgba(255,255,255,0.2); border-top-color: white; border-radius: 50%; animation: spin 0.7s linear infinite; display: inline-block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading-skeleton { background: linear-gradient(90deg, var(--bg-input) 25%, var(--bg-card) 50%, var(--bg-input) 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 6px; height: 20px; margin: 8px 0; }
+  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+  .pipeline-steps { padding: 16px 0; }
+  .pipeline-step { display: flex; align-items: center; gap: 12px; padding: 8px 0; font-size: 13px; }
+  .pipeline-step-icon { width: 24px; text-align: center; font-size: 16px; }
+  .pipeline-step-label { flex: 1; } .pipeline-step-status { font-size: 12px; font-weight: 500; }
+  .pipeline-step.done .pipeline-step-status { color: var(--accent-green); }
+  .pipeline-step.running .pipeline-step-status { color: var(--accent-blue); }
+  .pipeline-step.pending .pipeline-step-status { color: var(--text-muted); }
+  .pipeline-step.done .pipeline-step-label { color: var(--text-secondary); }
+  .pipeline-step.running .pipeline-step-label { color: var(--text-primary); font-weight: 500; }
+  .pipeline-step.pending .pipeline-step-label { color: var(--text-muted); }
+  .pipeline-detail { font-size: 11px; color: var(--text-muted); margin-left: 36px; margin-top: -4px; padding-bottom: 4px; }
+
+  .filter-bar { display: flex; gap: 12px; align-items: flex-end; margin-bottom: 24px; flex-wrap: wrap; } .filter-group { min-width: 160px; }
+  select.input-field { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M6 8L1 3h10z' fill='%236b7280'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 32px; }
+  .client-table { width: 100%; border-collapse: collapse; }
+  .client-table th { text-align: left; padding: 12px 16px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); border-bottom: 1px solid var(--border); }
+  .client-table td { padding: 14px 16px; font-size: 13px; border-bottom: 1px solid rgba(45,51,72,0.5); }
+  .client-table tr:hover td { background: rgba(59,130,246,0.04); }
+  .latency-cell { font-variant-numeric: tabular-nums; font-weight: 500; }
+  .latency-good { color: var(--accent-green); } .latency-moderate { color: var(--accent-yellow); } .latency-bad { color: var(--accent-red); }
+  .empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); }
+  .empty-icon { font-size: 48px; margin-bottom: 16px; opacity: 0.5; } .empty-title { font-size: 16px; font-weight: 500; color: var(--text-secondary); margin-bottom: 8px; }
+  .empty-desc { font-size: 13px; max-width: 420px; margin: 0 auto; line-height: 1.6; }
+  .wip-banner { background: linear-gradient(135deg, rgba(245,158,11,0.1), rgba(249,115,22,0.1)); border: 1px solid rgba(245,158,11,0.25); border-radius: 10px; padding: 14px 18px; display: flex; align-items: center; gap: 10px; margin-bottom: 24px; font-size: 13px; color: var(--accent-yellow); }
+  .mini-bar-container { display: flex; align-items: center; gap: 8px; }
+  .mini-bar-bg { flex: 1; height: 6px; background: var(--bg-input); border-radius: 3px; overflow: hidden; max-width: 80px; }
+  .mini-bar-fill { height: 100%; border-radius: 3px; transition: width 0.4s; }
+
+  .log-entry { font-family: 'SF Mono','Fira Code','Consolas', monospace; font-size: 12px; padding: 8px 12px; background: rgba(15,17,23,0.6); border-radius: 6px; margin: 4px 0; color: var(--text-secondary); line-height: 1.5; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+  .log-entry .log-ts { color: var(--accent-cyan); } .log-entry .log-level-info { color: var(--accent-blue); }
+  .log-entry .log-level-warn { color: var(--accent-yellow); } .log-entry .log-level-error { color: var(--accent-red); }
+  .log-entry.log-highlight { border-left: 3px solid var(--accent-yellow); background: rgba(245,158,11,0.06); }
+  .section-divider { margin: 24px 0 20px; padding-top: 20px; border-top: 1px solid var(--border); }
+  .section-title { font-size: 13px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+  .log-tabs { display: flex; gap: 2px; background: var(--bg-input); border-radius: 10px; padding: 3px; margin-bottom: 16px; width: fit-content; }
+  .log-tab { padding: 7px 16px; border-radius: 8px; font-size: 13px; cursor: pointer; border: none; background: transparent; color: var(--text-muted); transition: all 0.15s; }
+  .log-tab:hover { color: var(--text-secondary); } .log-tab.active { background: var(--accent-blue); color: white; }
+  .total-latency-bar { margin-top: 12px; padding-top: 12px; border-top: 2px solid var(--border); display: flex; align-items: center; gap: 12px; }
+  .total-label { width: 180px; text-align: right; padding-right: 12px; font-size: 14px; font-weight: 700; }
+  .total-value { width: 80px; text-align: right; font-size: 15px; font-weight: 700; }
+  .pinpoint-indicator { display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2); border-radius: 10px; margin-top: 16px; font-size: 13px; color: var(--accent-red); }
+  .pinpoint-indicator strong { color: var(--text-primary); }
+  .payload-summary { background: var(--bg-input); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px; margin-top: 12px; font-size: 12px; color: var(--text-muted); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .payload-summary strong { color: var(--text-secondary); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+
+const DEFAULT_CONFIG = {
+  openaiApiKey: '',
+  openaiModel: 'gpt-4.1',
+  ameliaClients: [],
+  serviceAccountToken: '',
+};
+
+const { useState, useEffect, useCallback, useRef } = React;
+
+// ═══════════════════════════════════════════════
+// LOG FILE PARSING ENGINE
+// ═══════════════════════════════════════════════
+// Supports: .log, .txt, .json, .jsonl, .csv, .ndjson
+
+function parseLogFile(text, fileName) {
+  const lines = text.split('\n');
+  const entries = [];
+
+  // Detect if the file is Engine or EVG based on filename
+  const fnLower = fileName.toLowerCase();
+  let fileSource = 'unknown';
+  if (/engine|amelia|nlu|dialog|api|backend/i.test(fnLower)) fileSource = 'engine';
+  else if (/evg|jambonz|stt|tts|voice|speech|gateway|orchestrat/i.test(fnLower)) fileSource = 'evg';
+
+  // Check if it's a CSV file (Engine format from Axiom export)
+  let isCSV = false;
+  if (fnLower.includes('.csv') || (lines.length > 0 && lines[0].includes('_time,') && lines[0].includes(',message,'))) {
+    isCSV = true;
+    fileSource = 'engine';
+  }
+
+  if (isCSV) {
+    entries.push(...parseCSVLogFile(lines, fileName));
+  } else {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line.trim()) continue;
+      const entry = parseSingleLine(line, fileName);
+      if (entry) {
+        entry.fileSource = fileSource;
+        entry.fileName = fileName;
+        entries.push(entry);
+      }
+    }
+  }
+
+  // If we couldn't detect from filename, infer from content
+  if (fileSource === 'unknown' && entries.length > 0) {
+    // Check for structured fields that indicate source
+    const hasCallId = entries.some(e => e.callId || e.sbcCallid);
+    const hasConvId = entries.some(e => e.conversationId);
+    if (hasCallId || entries.some(e => /speechDetected|vendor.microsoft|call_status/i.test(e.msg))) {
+      fileSource = 'evg';
+    } else if (hasConvId || entries.some(e => /AgenticPlanning|DefaultBpnProcessEngine|OpenAi.*chat|Conversation-/i.test(e.msg))) {
+      fileSource = 'engine';
+    } else {
+      const engineHits = entries.filter(e => /NLU|Dialog|API|Response|Connector|Backend|AgenticPlanning|BpnProcess|OpenAi/i.test(e.msg)).length;
+      const evgHits = entries.filter(e => /STT|TTS|Speech|Synthe|Gateway|speechDetected|call_status/i.test(e.msg)).length;
+      fileSource = engineHits > evgHits ? 'engine' : evgHits > 0 ? 'evg' : 'unknown';
+    }
+    entries.forEach(e => e.fileSource = fileSource);
+  }
+
+  return entries;
+}
+
+function parseCSVLogFile(lines, fileName) {
+  const entries = [];
+  if (lines.length < 2) return entries;
+
+  const header = lines[0].split(',').map(h => h.trim());
+  const timeIdx = header.indexOf('_time');
+  const fileIdx = header.indexOf('file');
+  const hostIdx = header.indexOf('host');
+  const messageIdx = header.indexOf('message');
+  const sourceTypeIdx = header.indexOf('source_type');
+  const timestampIdx = header.indexOf('timestamp');
+
+  if (messageIdx === -1) return entries; // Not a valid Engine CSV
+
+  // Parse CSV rows
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+
+    // Simple CSV parse - handle quoted fields
+    const row = parseCSVRow(line);
+    if (row.length < 4) continue;
+
+    const message = row[messageIdx] || '';
+    if (!message.trim()) continue;
+
+    // Parse the Java Spring log format from message column
+    // Format: YYYY-MM-DD HH:MM:SS.mmm LEVEL PID --- [threadId] [Conversation-CONVID] ClassName : Message
+    const parsed = parseEngineLogMessage(message);
+
+    const entry = {
+      ts: parsed.ts || (row[timeIdx] || ''),
+      level: parsed.level || 'INFO',
+      msg: parsed.msg || message,
+      conversationId: parsed.conversationId || '',
+      className: parsed.className || '',
+      raw: line,
+      fileSource: 'engine',
+      fileName: fileName,
+    };
+
+    entries.push(entry);
+  }
+
+  return entries;
+}
+
+function parseCSVRow(line) {
+  const result = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char === '"') {
+      inQuotes = !inQuotes;
+    } else if (char === ',' && !inQuotes) {
+      result.push(current.trim());
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  result.push(current.trim());
+  return result;
+}
+
+function parseEngineLogMessage(msg) {
+  let ts = '';
+  let level = 'INFO';
+  let conversationId = '';
+  let className = '';
+
+  // Try to extract timestamp from start: YYYY-MM-DD HH:MM:SS.mmm
+  // Append 'Z' to ensure UTC interpretation (Engine logs are server-side UTC)
+  const tsMatch = msg.match(/^(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}\.\d{3})\s+(DEBUG|INFO|WARN|ERROR|FATAL|TRACE|WARNING)/);
+  if (tsMatch) {
+    ts = tsMatch[1].replace(' ', 'T') + 'Z';
+    level = tsMatch[2].toUpperCase().replace('WARNING', 'WARN');
+  }
+
+  // Extract conversation ID: [Conversation-XXXXX] or [AgenticResponder_XXXXX] or other thread patterns
+  const convMatch = msg.match(/\[Conversation-([A-Z0-9]+)\]/);
+  if (convMatch) {
+    conversationId = convMatch[1];
+  } else {
+    // Also match AgenticResponder, User-Engagement-Message-Generator, etc.
+    const altConvMatch = msg.match(/\[(?:AgenticResponder|User-Engagement-Message-Generator|AmeliaIntegrationClientGatewayImpl)[_-]([A-Z0-9]+)\]/);
+    if (altConvMatch) conversationId = altConvMatch[1];
+  }
+
+  // Extract class name and the message content after it
+  // Pattern: ...] ClassName : Message content here
+  const classAndMsg = msg.match(/\]\s+([A-Za-z0-9.]+)\s*:\s*([\s\S]*)/);
+  if (classAndMsg) {
+    className = classAndMsg[1];
+  }
+
+  // Keep full message including class name for classification (classifiers check for class patterns)
+  // But strip the timestamp/level/thread prefix for readability
+  let msgPart = msg;
+  const contentStart = msg.indexOf('] ');
+  const convTag = msg.indexOf('[Conversation-') >= 0 ? '[Conversation-' : (msg.indexOf('[AgenticResponder_') >= 0 ? '[AgenticResponder_' : null);
+  if (contentStart > 0 && convTag) {
+    // Find the part after the last bracket group before the class name
+    const afterConv = msg.indexOf('] ', msg.indexOf(convTag));
+    if (afterConv > 0) {
+      msgPart = msg.substring(afterConv + 2).trim();
+    }
+  } else if (contentStart > 0) {
+    msgPart = msg.substring(contentStart + 2).trim();
+  }
+
+  return { ts, level, msg: msgPart, conversationId, className };
+}
+
+// Pino/Bunyan numeric level mapping
+const PINO_LEVELS = { 10: 'TRACE', 20: 'DEBUG', 30: 'INFO', 40: 'WARN', 50: 'ERROR', 60: 'FATAL' };
+
+function parseSingleLine(line, fileName) {
+  // Skip SSH preamble, terminal output, file separators, grep lines
+  if (!line.trim() || line.match(/^grep\s|^#|^-{3,}|^==>.*<==$|^\[root@|^Last login:|^ssh\s|^Warning:|^Connection to|^\s*$|^[a-zA-Z]+@/)) return null;
+
+  // Try JSON first (EVG format - jambonz logs)
+  if (line.trim().startsWith('{')) {
+    try {
+      const obj = JSON.parse(line);
+
+      // Handle numeric Pino/Bunyan levels (20=DEBUG, 30=INFO, etc.)
+      let level = obj.level || obj.severity || obj.log_level || obj.loglevel || 'INFO';
+      if (typeof level === 'number') {
+        level = PINO_LEVELS[level] || (level <= 20 ? 'DEBUG' : level <= 30 ? 'INFO' : level <= 40 ? 'WARN' : 'ERROR');
+      } else {
+        level = String(level).toUpperCase();
+      }
+
+      // Handle epoch millisecond timestamps
+      let ts = obj.time || obj.timestamp || obj._time || obj.ts || obj.date || obj['@timestamp'] || '';
+      if (typeof ts === 'number') {
+        ts = new Date(ts).toISOString();
+      } else if (typeof ts === 'string' && /^\d{10,13}$/.test(ts.trim())) {
+        ts = new Date(parseInt(ts.trim())).toISOString();
+      }
+
+      // EVG/jambonz JSON format — extract structured fields
+      // Speech transcript can be at multiple nesting levels in EVG logs
+      const speechTranscript =
+        obj.evt?.alternatives?.[0]?.transcript ||
+        obj.evt?.vendor?.evt?.alternatives?.[0]?.transcript ||
+        obj.obj?.data?.speech?.alternatives?.[0]?.transcript ||
+        '';
+      const speechVendor =
+        obj.vendor ||
+        obj.evt?.vendor?.name ||
+        obj.obj?.data?.speech?.vendor?.name ||
+        '';
+
+      const entry = {
+        ts: ts,
+        level: level,
+        msg: obj.message || obj.msg || obj.text || obj.log || obj.body || '',
+        raw: line,
+
+        // EVG-specific structured fields
+        callId: obj.callId || obj.call_id || '',
+        callSid: obj.callSid || obj.call_sid || '',
+        sbcCallid: obj.sbcCallid || obj.sbc_callid || (obj.obj?.data?.sbc_callid) || '',
+        eventType: obj.obj?.type || obj.type || '',
+        speechTranscript: speechTranscript,
+        speechVendor: typeof speechVendor === 'string' ? speechVendor : (speechVendor?.name || ''),
+        callStatus: obj.obj?.data?.call_status || '',
+        // Store whether this line has a final transcript (for STT classification)
+        isFinalTranscript: obj.evt?.is_final === true || obj.evt?.vendor?.evt?.is_final === true,
+      };
+
+      // If no explicit msg, construct from available fields
+      if (!entry.msg) {
+        const parts = [];
+        if (entry.eventType) parts.push(entry.eventType);
+        if (entry.speechTranscript) parts.push(`transcript: "${entry.speechTranscript}"`);
+        if (entry.callStatus) parts.push(`status: ${entry.callStatus}`);
+        entry.msg = parts.length > 0 ? parts.join(' | ') : JSON.stringify(obj).substring(0, 200);
+      }
+
+      return entry;
+    } catch(e) { /* not JSON, fall through */ }
+  }
+
+  // Skip non-log lines (SSH preamble continuation, empty, etc.)
+  if (line.match(/^grep\s|^#|^-{3,}/)) return null;
+
+  // Common log format: 2026-04-16T10:23:01.234Z [INFO] [Component] message
+  const isoMatch = line.match(/^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[\d.]*Z?)\s*[\[\(]?(INFO|WARN|WARNING|ERROR|DEBUG|TRACE|CRITICAL|FATAL)[\]\)]?\s*(.*)/i);
+  if (isoMatch) {
+    return { ts: isoMatch[1], level: isoMatch[2].toUpperCase().replace('WARNING','WARN'), msg: isoMatch[3], raw: line };
+  }
+
+  // Format: [timestamp] LEVEL message
+  const bracketMatch = line.match(/^\[([^\]]+)\]\s*[\[\(]?(INFO|WARN|WARNING|ERROR|DEBUG|TRACE|CRITICAL|FATAL)[\]\)]?\s*(.*)/i);
+  if (bracketMatch) {
+    return { ts: bracketMatch[1], level: bracketMatch[2].toUpperCase().replace('WARNING','WARN'), msg: bracketMatch[3], raw: line };
+  }
+
+  // Format: LEVEL timestamp message
+  const levelFirstMatch = line.match(/^(INFO|WARN|WARNING|ERROR|DEBUG|TRACE|CRITICAL|FATAL)\s+(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[\d.]*Z?)\s*(.*)/i);
+  if (levelFirstMatch) {
+    return { ts: levelFirstMatch[2], level: levelFirstMatch[1].toUpperCase().replace('WARNING','WARN'), msg: levelFirstMatch[3], raw: line };
+  }
+
+  // Fallback: treat whole line as message, try to find a timestamp anywhere
+  const anyTs = line.match(/(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[\d.]*Z?)/);
+  const anyLevel = line.match(/\b(INFO|WARN|WARNING|ERROR|DEBUG|CRITICAL|FATAL)\b/i);
+  if (line.trim().length > 5) {
+    return {
+      ts: anyTs ? anyTs[1] : '',
+      level: anyLevel ? anyLevel[1].toUpperCase().replace('WARNING','WARN') : 'INFO',
+      msg: line.trim(),
+      raw: line,
+    };
+  }
+  return null;
+}
+
+// ═══════════════════════════════════════════════
+// STAGE CLASSIFICATION & LATENCY EXTRACTION
+// ═══════════════════════════════════════════════
+const STAGE_CLASSIFIERS = [
+  { key: 'stt', label: 'STT (Speech-to-Text)', source: 'EVG', patterns: [
+    /Gather[:\s_]*onTranscription/i, /Gather[:\s_]*startTranscribing/i,
+    /Gather[:\s]exec\b/i, /TaskGather/i,
+    /_startAsrTimer/i, /asr.*timer/i,
+    /speechDetected/i, /speech.*alternatives/i, /\btranscript\b/i, /recogni/i,
+    /TaskListen/i, /_onDTMF/i,
+    /task.*#\d+.*gather/i, /completed task.*gather/i,
+  ] },
+  { key: 'nlu', label: 'NLU / Intent Classification', source: 'Engine', patterns: [/AgenticPlanning/i, /AssignAgent/i, /ClassificationEngine/i, /intent.*classif/i, /Agentic.*relevance/i, /AbstractAgenticLlmService/i] },
+  { key: 'response', label: 'Response Generation (LLM)', source: 'Engine', patterns: [/UserEngagementMessage/i, /GenerateFiller/i, /AgenticConversation/i, /CognitiveProvider/i, /OpenAi.*chat/i, /OpenAi.*stream/i, /DefaultChatCompletionService/i, /OutboundTextMessage/i, /speechMessageText/i, /DefaultUserEngagementMessageService/i] },
+  { key: 'dialog', label: 'Dialog / BPN Execution', source: 'Engine', patterns: [/BpnProcess/i, /BpnTask/i, /BpnEngine/i, /BpnScript/i, /DefaultBpnProcessEngine/i, /DeterministicTask/i, /ContextDialog/i, /InboundConversationMessage/i, /MessageRewriter/i, /BpnScriptTaskExecutor/i, /BpnVariableStore/i, /BpnVertexContext/i, /BpnExecutionEvent/i, /script-logger/i, /RegexGazetteer/i, /CloseConversationHandler/i, /DefaultLoggingService/i] },
+  { key: 'api', label: 'API / Backend Calls', source: 'Engine', patterns: [/ApiTask/i, /api.*endpoint/i, /RestTemplate/i, /HttpClient/i, /external.*service/i, /connector.*call/i, /integration.*service/i, /AmeliaIntegrationClientGatewayImpl/i, /Submitting requestId/i, /Returned requestId/i] },
+  { key: 'tts', label: 'TTS (Text-to-Speech)', source: 'EVG', patterns: [
+    /tts rtt/i, /TaskSay[:\s]exec/i, /Say[:\s]exec.*play/i,
+    /Say got playback/i, /got playback-start/i, /Play got playback/i, /Play received uuid/i,
+    /\bsay\b.*verb/i, /synthe/i, /\btts\b/i, /audio.*generat/i, /elevenlabs/i, /voice.*output/i,
+    /task.*#\d+.*\bsay\b/i, /completed task.*\bsay\b/i,
+  ] },
+  { key: 'evg', label: 'EVG Orchestration', source: 'EVG', patterns: [
+    /session:new/i, /call:status/i, /WsRequestor/i, /websocket.*sent/i,
+    /verb:hook/i, /webhook/i, /new incoming call/i,
+    /ActionHookDelayProcessor/i, /Starting timoutTimer/i, /purgeCalls/i,
+    /retrieved application/i, /Setting env_vars/i, /checkLimits/i,
+    /call counts/i, /CallSession[:\s]/i, /received command/i,
+    /_onCommand/i, /_awaitCommandsOrHangup/i, /regbot/i,
+    /Account SID/i, /purged.*calls/i, /task.*#\d+.*config/i,
+  ] },
+];
+
+function classifyLogEntry(entry) {
+  // entry can be a full object or just a message string for backwards compatibility
+  const msg = typeof entry === 'string' ? entry : (entry?.msg || '');
+  const eventType = typeof entry === 'object' ? entry?.eventType : '';
+  const callStatus = typeof entry === 'object' ? entry?.callStatus : '';
+  const speechTranscript = typeof entry === 'object' ? entry?.speechTranscript : '';
+  const isFinalTranscript = typeof entry === 'object' ? entry?.isFinalTranscript : false;
+
+  // Check structured fields first — STT takes priority over generic EVG
+  if (speechTranscript || isFinalTranscript) return 'stt';
+  if (eventType === 'session:new') return 'evg';
+  if (eventType?.includes('call:status') && !speechTranscript) return 'evg';
+
+  // Pattern matching against msg
+  for (const s of STAGE_CLASSIFIERS) {
+    for (const p of s.patterns) {
+      if (p.test(msg)) return s.key;
+    }
+  }
+
+  // Fallback: check raw field for Engine class names that get stripped during message extraction
+  // e.g. "script-logger" appears between brackets in Engine logs but not in the extracted msg
+  const raw = typeof entry === 'object' ? (entry?.raw || '') : '';
+  if (/\bscript-logger\b/i.test(raw)) return 'dialog';
+  if (/\bAmeliaIntegrationClientGatewayImpl\b/i.test(raw)) return 'api';
+  if (/\bDefaultUserEngagementMessageService\b/i.test(raw)) return 'response';
+  if (/\bDefaultChatCompletionService\b/i.test(raw)) return 'response';
+  if (/\bClassificationEngine\b/i.test(raw)) return 'nlu';
+
+  return 'uncategorized';
+}
+
+// Smart latency extraction — looks for EXPLICIT latency indicators, not just any "Nms"
+function extractLatencyMs(msg) {
+  // ══ EXCLUSIONS: patterns that look like latency but are NOT ══
+  // "Starting timoutTimer of 30000ms" — this is a config/timeout value, not a measured latency
+  // "_startAsrTimer: set for 2000ms" — timer configuration, not measurement
+  if (/(?:timoutTimer|Timer)\s+of\s+\d+/i.test(msg)) return null;
+  if (/_startAsrTimer.*set for/i.test(msg)) return null;
+  if (/NoResponseTi/i.test(msg)) return null; // ActionHookDelayProcessor no-response timeout
+
+  // ══ Priority 0: EVG-specific latency patterns ══
+  // "tts rtt time for 33 chars on microsoft: 289" — number at end after colon is ms
+  const ttsRttMatch = msg.match(/tts rtt time.*:\s*(\d+(?:\.\d+)?)\s*$/i);
+  if (ttsRttMatch) return parseFloat(ttsRttMatch[1]);
+
+  // "succeeded in 15ms" — webhook round-trip time
+  const succeededMatch = msg.match(/succeeded in (\d+(?:\.\d+)?)\s*ms\b/i);
+  if (succeededMatch) return parseFloat(succeededMatch[1]);
+
+  // ══ Priority 1a: Amelia-specific time patterns (μs, ns, s conversions first) ══
+  const microsMatch = msg.match(/(?:in|after|took|completed in)\s+(\d+(?:\.\d+)?)\s*[μu]s\b/i);
+  if (microsMatch) return parseFloat(microsMatch[1]) / 1000; // Convert μs to ms
+
+  const nanoMatch = msg.match(/(?:Time taken|took|in)\s*[=:]\s*(\d+(?:\.\d+)?)\s*ns\b/i);
+  if (nanoMatch) return parseFloat(nanoMatch[1]) / 1000000; // Convert ns to ms
+
+  // Seconds: must end with "s" followed by non-alphanumeric (to avoid matching sbc_callid, session, etc.)
+  const secondsMatch = msg.match(/(?:in|took|after|completed in|finished in|Chat completion call in)\s+(\d+(?:\.\d+)?)\s+s(?:ec(?:onds?)?)?\s*(?:[,.\);\]$]|$)/i);
+  if (secondsMatch) return parseFloat(secondsMatch[1]) * 1000; // Convert s to ms
+
+  // ══ Priority 1b: Explicit latency/duration key-value patterns in milliseconds ══
+  const explicitPatterns = [
+    /(?:duration|latency|elapsed|took|processing[_\s]?time|response[_\s]?time|exec[_\s]?time|round[_\s]?trip|rtt)\s*[=:]\s*(\d+(?:\.\d+)?)\s*ms\b/i,
+    /(?:took|in|after|completed in|finished in|processed in)\s+(\d+(?:\.\d+)?)\s*ms\b/i,
+    /(?:duration|latency|elapsed|took|processing[_\s]?time|response[_\s]?time|exec[_\s]?time)\s*[=:]\s*(\d+(?:\.\d+)?)\s*s(?:ec|econds?)?\b/i,
+  ];
+
+  for (const pat of explicitPatterns) {
+    const m = msg.match(pat);
+    if (m) {
+      return parseFloat(m[1]);
+    }
+  }
+
+  // ══ Priority 1c: Special case for elapsedTime (in LlmMetrics context) ══
+  const elapsedMatch = msg.match(/elapsedTime[=:]\s*(\d+(?:\.\d+)?)\b/i);
+  if (elapsedMatch) return parseFloat(elapsedMatch[1]);
+
+  // ══ Priority 2: Pattern like "— 345ms" or "- 234ms" ══
+  const dashMs = msg.match(/[—–-]\s*(\d+(?:\.\d+)?)\s*ms\b/i);
+  if (dashMs) return parseFloat(dashMs[1]);
+
+  // ══ Priority 3: Standalone "Nms" at END of message ══
+  // Only if preceded by space/dash (not "=1000ms" config values)
+  const endMs = msg.match(/[\s—–-](\d+(?:\.\d+)?)\s*ms\s*$/i);
+  if (endMs) return parseFloat(endMs[1]);
+
+  // DO NOT fall back to matching any random "Nms" in the middle of the message
+  return null;
+}
+
+// Calculate latency from timestamp deltas between first and last log entry in a stage
+function calculateTimestampDelta(logs) {
+  if (logs.length < 2) return null;
+  const timestamps = logs
+    .map(l => l.ts)
+    .filter(ts => ts && ts.length > 10)
+    .map(ts => {
+      try { return new Date(ts).getTime(); } catch(e) { return NaN; }
+    })
+    .filter(t => !isNaN(t))
+    .sort((a, b) => a - b);
+
+  if (timestamps.length < 2) return null;
+  const delta = timestamps[timestamps.length - 1] - timestamps[0];
+  return delta > 0 ? delta : null;
+}
+
+// ═══════════════════════════════════════════════
+// SUBMIT/RETURN PAIR LATENCY (Engine API calls)
+// ═══════════════════════════════════════════════
+
+/**
+ * Compute latency for Engine API calls by pairing "Submitting requestId: X" with "Returned requestId: X".
+ * Returns array of { requestId, service, latencyMs, submitTs, returnTs }.
+ */
+function computeSubmitReturnLatencies(engineLogs) {
+  const submits = new Map(); // requestId → { ts, service }
+  const pairs = [];
+
+  for (const entry of engineLogs) {
+    const msg = entry.msg || '';
+    const raw = entry.raw || '';
+    const fullMsg = msg + ' ' + raw;
+
+    const submitMatch = fullMsg.match(/Submitting requestId:\s*(\S+).*?service:\s*(\S+)/i);
+    if (submitMatch && entry.ts) {
+      submits.set(submitMatch[1], { ts: entry.ts, time: new Date(entry.ts).getTime(), service: submitMatch[2] });
+      continue;
+    }
+
+    const returnMatch = fullMsg.match(/Returned requestId:\s*(\S+)/i);
+    if (returnMatch && entry.ts) {
+      const sub = submits.get(returnMatch[1]);
+      if (sub) {
+        const returnTime = new Date(entry.ts).getTime();
+        const latencyMs = returnTime - sub.time;
+        if (latencyMs > 0 && latencyMs < 300000) {
+          pairs.push({ requestId: returnMatch[1], service: sub.service, latencyMs, submitTs: sub.ts, returnTs: entry.ts });
+        }
+        submits.delete(returnMatch[1]);
+      }
+    }
+  }
+  return pairs;
+}
+
+// ═══════════════════════════════════════════════
+// FULL CONVERSATION FLOW BUILDER
+// Maps the complete call cycle: Amelia → EVG → TTS → User → STT → Amelia → Integrations → Amelia
+// Correlates EVG + Engine logs by timestamp to build per-turn segment breakdown
+// ═══════════════════════════════════════════════
+
+function buildConversationFlow(evgLogs, engineLogs, apiPairLatencies) {
+  const sorted = [...evgLogs].sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+  const toMs = (s) => s ? new Date(s).getTime() : NaN;
+
+  // ── Collect boundary events ──
+  const sayExecs = [];       // TaskSay:exec — Amelia starts speaking
+  const sayPlaybacks = [];   // got playback-start — TTS audio begins
+  const sayCompletes = [];   // Say:exec completed play — audio finished
+  const gatherExecs = [];    // Gather:exec — start listening for user
+  const gatherStartTranscribing = []; // Gather:_startTranscribing — STT engine starts
+  const gatherTranscriptions = [];    // Gather:_onTranscription — partial/final transcripts
+  const asrTimerStarts = [];          // _startAsrTimer: set for — ASR timeout starts
+  const gatherResolves = []; // TaskGather:resolve with reason speech — user done (ONLY primary resolve, not _resolve sub-events)
+  const ttsRtts = [];        // tts rtt time — synthesis latency
+  const finalTranscripts = []; // Final STT transcript
+  const webhookSuccesses = []; // webhook round-trip
+  const ameliaTexts = [];    // AM5 text lines — what Amelia says
+
+  for (const e of sorted) {
+    const msg = e.msg || '';
+    const t = e.ts;
+    if (!t) continue;
+    const time = toMs(t);
+    if (isNaN(time)) continue;
+
+    if (/TaskSay[:\s]exec\b/i.test(msg) && !/play result/i.test(msg)) {
+      sayExecs.push({ ts: t, time, entry: e });
+    }
+    if (/got playback-start/i.test(msg) || /Say got playback/i.test(msg)) {
+      sayPlaybacks.push({ ts: t, time, entry: e });
+    }
+    if (/Say[:\s]exec completed play/i.test(msg)) {
+      sayCompletes.push({ ts: t, time, entry: e });
+    }
+    if (/Gather[:\s]exec\b/i.test(msg) && !/stashing/i.test(msg)) {
+      gatherExecs.push({ ts: t, time, entry: e });
+    }
+    // STT sub-phase events
+    if (/Gather[:\s_]*startTranscribing/i.test(msg)) {
+      gatherStartTranscribing.push({ ts: t, time, entry: e });
+    }
+    if (/Gather[:\s_]*onTranscription/i.test(msg)) {
+      // Detect if this is a final transcript
+      let isFinal = e.isFinalTranscript || /isFinalTranscript.*true|is_final.*true|FINAL/i.test(msg);
+      let transcript = e.speechTranscript || '';
+      if (!transcript) { try { const o = JSON.parse(e.raw || '{}'); transcript = o.evt?.alternatives?.[0]?.transcript || o.evt?.vendor?.evt?.alternatives?.[0]?.transcript || ''; } catch(x) {} }
+      gatherTranscriptions.push({ ts: t, time, isFinal, transcript, entry: e });
+    }
+    if (/_startAsrTimer.*set for/i.test(msg)) {
+      const timerMatch = msg.match(/set for (\d+)ms/i);
+      asrTimerStarts.push({ ts: t, time, timerMs: timerMatch ? parseInt(timerMatch[1]) : 2000, entry: e });
+    }
+    // ONLY match the primary "resolve with reason speech" — NOT the _resolve sub-events
+    if (/TaskGather[:\s]*resolve with reason speech/i.test(msg)) {
+      let userText = e.speechTranscript || '';
+      if (!userText) { try { const o = JSON.parse(e.raw || '{}'); userText = o.evt?.alternatives?.[0]?.transcript || o.evt?.vendor?.evt?.alternatives?.[0]?.transcript || ''; } catch(x) {} }
+      gatherResolves.push({ ts: t, time, userText, entry: e });
+    }
+    if (/tts rtt time/i.test(msg)) {
+      const m = msg.match(/tts rtt time.*:\s*(\d+)/i);
+      ttsRtts.push({ ts: t, time, rttMs: m ? parseInt(m[1]) : 0, entry: e });
+    }
+    if (e.isFinalTranscript && e.speechTranscript) {
+      finalTranscripts.push({ ts: t, time, text: e.speechTranscript, entry: e });
+    }
+    if (/WsRequestor:request.*succeeded in/i.test(msg)) {
+      const m = msg.match(/succeeded in (\d+)ms/i);
+      webhookSuccesses.push({ ts: t, time, webhookMs: m ? parseInt(m[1]) : 0, entry: e });
+    }
+    // Amelia's spoken text from "AM5-NNNNN -- before: ..."
+    const amMatch = msg.match(/AM\d+-\d+\s*--\s*(?:before|after):\s*(.+)/i);
+    if (amMatch) ameliaTexts.push({ ts: t, time, text: amMatch[1].trim() });
+  }
+
+  // ── Build turn-by-turn flow ──
+  // Cycle: SAY_EXEC(s) → SAY_COMPLETE(s) → GATHER_EXEC → GATHER_RESOLVE → [Engine gap] → next SAY_EXEC
+  const turns = [];
+
+  for (let gi = 0; gi < gatherResolves.length; gi++) {
+    const resolve = gatherResolves[gi];
+    const prevResolve = gi > 0 ? gatherResolves[gi - 1] : null;
+    const prevResolveTime = prevResolve ? prevResolve.time : 0;
+    const nextResolve = gi < gatherResolves.length - 1 ? gatherResolves[gi + 1] : null;
+    const nextResolveTime = nextResolve ? nextResolve.time : Infinity;
+
+    // ── AMELIA SPEAKING PHASE (before this user turn) ──
+    const ameliaSays = sayExecs.filter(s => s.time > prevResolveTime && s.time < resolve.time);
+    const firstSay = ameliaSays[0];
+    const gatherExec = gatherExecs.find(g => g.time >= (firstSay?.time || prevResolveTime) && g.time <= resolve.time);
+    const lastSayComplete = sayCompletes.filter(s =>
+      s.time > (firstSay?.time || prevResolveTime) && s.time <= (gatherExec?.time || resolve.time)
+    ).pop();
+    const firstPlayback = sayPlaybacks.find(p =>
+      p.time >= (firstSay?.time || 0) && p.time <= (gatherExec?.time || resolve.time)
+    );
+    const ttsRtt = ttsRtts.find(t =>
+      t.time >= (firstSay?.time || 0) - 200 && t.time <= (firstPlayback?.time || resolve.time) + 500
+    );
+
+    // Amelia's text
+    let ameliaText = '';
+    if (firstSay) {
+      const nearbyText = ameliaTexts.find(t => Math.abs(t.time - firstSay.time) < 500);
+      ameliaText = nearbyText?.text || '';
+    }
+
+    // ── USER SPEAKING / STT SUB-PHASES ──
+    const lastTranscript = finalTranscripts.filter(f => f.time <= resolve.time && f.time > prevResolveTime).pop();
+
+    // STT sub-phase boundary events for this turn
+    const turnStartTranscribing = gatherStartTranscribing.find(s => s.time >= (gatherExec?.time || prevResolveTime) && s.time <= resolve.time);
+    const turnTranscriptions = gatherTranscriptions.filter(t => t.time > (gatherExec?.time || prevResolveTime) && t.time <= resolve.time);
+    const firstTranscription = turnTranscriptions[0] || null;
+    const lastFinalTranscription = [...turnTranscriptions].reverse().find(t => t.isFinal) || null;
+    const turnAsrTimerStart = asrTimerStarts.find(a => a.time > (lastFinalTranscription?.time || prevResolveTime) && a.time <= resolve.time + 50);
+
+    // STT sub-latencies
+    const sttActivationMs = (gatherExec && turnStartTranscribing) ? Math.round(turnStartTranscribing.time - gatherExec.time) : null;
+    const speechDetectionMs = (turnStartTranscribing && firstTranscription) ? Math.round(firstTranscription.time - turnStartTranscribing.time) : null;
+    const sttRecognitionMs = (firstTranscription && lastFinalTranscription && lastFinalTranscription !== firstTranscription)
+      ? Math.round(lastFinalTranscription.time - firstTranscription.time) : (firstTranscription && lastFinalTranscription ? 0 : null);
+    const asrFinalizationMs = (lastFinalTranscription || turnAsrTimerStart)
+      ? Math.round(resolve.time - (turnAsrTimerStart?.time || lastFinalTranscription?.time)) : null;
+    const asrTimerValueMs = turnAsrTimerStart?.timerMs || null;
+
+    // ── ENGINE PROCESSING PHASE ──
+    const webhook = webhookSuccesses.find(w => w.time >= resolve.time - 50 && w.time <= resolve.time + 200);
+    const nextSayExec = sayExecs.find(s => s.time > resolve.time && s.time < nextResolveTime);
+
+    // ── COMPUTE LATENCIES ──
+    const ttsLatencyMs = ttsRtt?.rttMs || (firstSay && firstPlayback ? firstPlayback.time - firstSay.time : null);
+    const ameliaDuration = firstSay && (lastSayComplete || gatherExec)
+      ? (lastSayComplete?.time || gatherExec?.time) - firstSay.time : null;
+    const userDuration = gatherExec ? resolve.time - gatherExec.time : null;
+    const engineStartTime = webhook?.time || resolve.time;
+    const engineEndTime = nextSayExec?.time || null;
+    const engineMs = engineEndTime ? engineEndTime - engineStartTime : null;
+    const systemMs = nextSayExec ? nextSayExec.time - resolve.time : null;
+
+    // ── CORRELATE ENGINE LOGS ──
+    let apiCalls = [];
+    let llmCalls = [];
+    let engineLogEntries = [];
+    if (engineMs && engineEndTime) {
+      const eStart = engineStartTime - 500;
+      const eEnd = engineEndTime + 500;
+      apiCalls = (apiPairLatencies || []).filter(p => {
+        const st = new Date(p.submitTs).getTime();
+        return st >= eStart && st <= eEnd;
+      });
+      engineLogEntries = (engineLogs || []).filter(e => {
+        if (!e.ts) return false;
+        const t = new Date(e.ts).getTime();
+        return t >= eStart && t <= eEnd;
+      });
+
+      // ── Extract LLM call latencies from Engine logs in this turn ──
+      // Look for patterns: "Chat completion call in X s", "elapsedTime=X", OpenAi chat/stream latencies
+      engineLogEntries.forEach(log => {
+        const m = log.msg || '';
+        const raw = log.raw || '';
+        const full = m + ' ' + raw;
+        // "Chat completion call in 1.234 s" or "Chat completion call in 1234ms"
+        let llmMatch = full.match(/Chat completion call in\s+(\d+(?:\.\d+)?)\s+(s|ms)\b/i);
+        if (llmMatch) {
+          const val = parseFloat(llmMatch[1]);
+          const ms = llmMatch[2] === 's' ? Math.round(val * 1000) : Math.round(val);
+          const modelMatch = full.match(/model[=:]\s*(\S+)/i);
+          llmCalls.push({ latencyMs: ms, model: modelMatch?.[1] || 'unknown', ts: log.ts, detail: 'Chat completion' });
+          return;
+        }
+        // "elapsedTime=947" in LlmMetrics / CognitiveProvider context
+        if (/(?:LlmMetric|CognitiveProvider|ChatCompletion|OpenAi)/i.test(full)) {
+          const elapsed = full.match(/elapsedTime[=:]\s*(\d+)/i);
+          if (elapsed) {
+            const modelMatch = full.match(/model[=:]\s*(\S+)/i);
+            llmCalls.push({ latencyMs: parseInt(elapsed[1]), model: modelMatch?.[1] || 'unknown', ts: log.ts, detail: 'LLM elapsed' });
+            return;
+          }
+        }
+        // "DefaultChatCompletionService ... took Nms" or "completed in Nms"
+        if (/DefaultChatCompletionService|AbstractAgenticLlmService/i.test(full)) {
+          const tookMatch = full.match(/(?:took|completed in|finished in)\s+(\d+)\s*ms/i);
+          if (tookMatch) {
+            llmCalls.push({ latencyMs: parseInt(tookMatch[1]), model: 'LLM', ts: log.ts, detail: 'ChatCompletion service' });
+          }
+        }
+      });
+    }
+
+    // Compute LLM total for this turn
+    const llmTotalMs = llmCalls.reduce((s, l) => s + l.latencyMs, 0);
+    const engineNonLlmMs = engineMs ? Math.max(0, engineMs - llmTotalMs) : null;
+
+    // Collect EVG logs for this turn
+    const turnStartTime = firstSay?.time || prevResolveTime;
+    const turnEndTime = nextSayExec?.time || resolve.time + (engineMs || 0);
+    const evgTurnLogs = sorted.filter(e => {
+      if (!e.ts) return false;
+      const t = toMs(e.ts);
+      return t >= turnStartTime && t <= turnEndTime;
+    });
+
+    turns.push({
+      turnNumber: gi + 1,
+      userText: resolve.userText || lastTranscript?.text || '(speech)',
+      ameliaText,
+      // Segments
+      ameliaSpeakStartTs: firstSay?.ts || null,
+      ameliaSpeakEndTs: lastSayComplete?.ts || gatherExec?.ts || null,
+      ttsLatencyMs,
+      ameliaDurationMs: ameliaDuration ? Math.round(ameliaDuration) : null,
+      gatherStartTs: gatherExec?.ts || null,
+      gatherResolveTs: resolve.ts,
+      userDurationMs: userDuration ? Math.round(userDuration) : null,
+      // STT sub-phases
+      sttActivationMs,
+      speechDetectionMs,
+      sttRecognitionMs,
+      asrFinalizationMs,
+      asrTimerValueMs,
+      sttStartTranscribingTs: turnStartTranscribing?.ts || null,
+      firstTranscriptionTs: firstTranscription?.ts || null,
+      lastFinalTranscriptionTs: lastFinalTranscription?.ts || null,
+      // Engine phases
+      webhookMs: webhook?.webhookMs || null,
+      engineStartTs: webhook?.ts || resolve.ts,
+      engineEndTs: nextSayExec?.ts || null,
+      engineProcessingMs: engineMs ? Math.round(engineMs) : null,
+      // LLM calls within Engine
+      llmCalls,
+      llmTotalMs,
+      engineNonLlmMs: engineNonLlmMs !== null ? Math.round(engineNonLlmMs) : null,
+      apiCalls,
+      engineLogCount: engineLogEntries.length,
+      engineLogEntries,
+      systemLatencyMs: systemMs ? Math.round(systemMs) : null,
+      evgLogCount: evgTurnLogs.length,
+      evgTurnLogs,
+    });
+  }
+
+  // ── Flow stats ──
+  const systemLats = turns.map(t => t.systemLatencyMs).filter(v => v !== null && v > 0);
+  const engineLats = turns.map(t => t.engineProcessingMs).filter(v => v !== null && v > 0);
+  const ttsLats = turns.map(t => t.ttsLatencyMs).filter(v => v !== null && v > 0);
+  const llmLats = turns.map(t => t.llmTotalMs).filter(v => v !== null && v > 0);
+  const sortedSys = [...systemLats].sort((a, b) => a - b);
+
+  const stats = {
+    turnCount: turns.length,
+    systemAvgMs: systemLats.length > 0 ? Math.round(systemLats.reduce((s,v) => s+v, 0) / systemLats.length) : 0,
+    systemMedianMs: sortedSys.length > 0 ? Math.round(sortedSys[Math.floor(sortedSys.length / 2)]) : 0,
+    systemWorstMs: systemLats.length > 0 ? Math.round(Math.max(...systemLats)) : 0,
+    systemBestMs: systemLats.length > 0 ? Math.round(Math.min(...systemLats)) : 0,
+    systemP95Ms: sortedSys.length >= 2 ? Math.round(sortedSys[Math.floor(sortedSys.length * 0.95)]) : (sortedSys[0] || 0),
+    systemWorstTurn: systemLats.length > 0 ? turns.find(t => t.systemLatencyMs === Math.max(...systemLats))?.turnNumber : null,
+    engineAvgMs: engineLats.length > 0 ? Math.round(engineLats.reduce((s,v) => s+v, 0) / engineLats.length) : 0,
+    ttsAvgMs: ttsLats.length > 0 ? Math.round(ttsLats.reduce((s,v) => s+v, 0) / ttsLats.length) : 0,
+    llmAvgMs: llmLats.length > 0 ? Math.round(llmLats.reduce((s,v) => s+v, 0) / llmLats.length) : 0,
+    totalConversationMs: turns.length > 0
+      ? toMs(turns[turns.length - 1].gatherResolveTs || '') - toMs(turns[0].ameliaSpeakStartTs || '')
+      : 0,
+  };
+
+  return { turns, stats };
+}
+
+
+function buildLLMPayload(filteredLogs, stageLatencies, conversationId, turnData) {
+  const latencySummary = stageLatencies.filter(s => s.ms > 0 || s.count > 0).map(s => {
+    const tag = s.ms > 1000 ? '[SLOW]' : s.ms > 400 ? '[ELEVATED]' : s.ms > 0 ? '[OK]' : '[NO LATENCY DATA]';
+    const detail = s.detail ? ` (${s.detail})` : '';
+    return `${s.label} (${s.source}): ${s.ms}ms ${tag} — ${s.count} entries${detail}`;
+  }).join('\n');
+  const total = stageLatencies.reduce((s, l) => s + l.ms, 0);
+  const bottleneck = stageLatencies.length > 0 ? stageLatencies.reduce((max, s) => s.ms > max.ms ? s : max, stageLatencies[0]) : null;
+  const importantLogs = [];
+  filteredLogs.filter(l => /warn|error|critical|fatal/i.test(l.level || '')).slice(0, 15)
+    .forEach(l => importantLogs.push(`[${l.level}] ${l.ts} ${l.msg}`));
+  if (bottleneck) {
+    filteredLogs.filter(l => classifyLogEntry(l) === bottleneck.key).slice(0, 8)
+      .forEach(l => { const line = `[${l.level}] ${l.ts} ${l.msg}`; if (!importantLogs.includes(line)) importantLogs.push(line); });
+  }
+
+  // Add full conversation flow data
+  let turnSummary = '';
+  if (turnData && turnData.turns && turnData.turns.length > 0) {
+    const s = turnData.stats;
+    turnSummary = '\n\nCONVERSATION FLOW (Turn-by-Turn, full call cycle: Amelia→TTS→User→STT→Engine→Integrations→Amelia):\n';
+    turnSummary += `Turns: ${s.turnCount} | System Latency: avg ${s.systemAvgMs}ms, worst ${s.systemWorstMs}ms (Turn ${s.systemWorstTurn}), best ${s.systemBestMs}ms, P95 ${s.systemP95Ms}ms\n`;
+    turnSummary += `Engine Processing avg: ${s.engineAvgMs}ms | LLM avg: ${s.llmAvgMs}ms | TTS avg: ${s.ttsAvgMs}ms | Conversation Duration: ${(s.totalConversationMs / 1000).toFixed(1)}s\n\n`;
+    turnData.turns.forEach(t => {
+      const isWorst = t.turnNumber === s.systemWorstTurn;
+      const flag = isWorst ? ' [SLOWEST TURN]' : t.systemLatencyMs > s.systemAvgMs * 2 ? ' [SLOW]' : '';
+      const apiDetail = (t.apiCalls || []).map(a => `${a.service}=${Math.round(a.latencyMs)}ms`).join(', ');
+      const llmDetail = (t.llmCalls || []).map(l => `${l.model}=${Math.round(l.latencyMs)}ms`).join(', ');
+      const sttDetail = [
+        t.sttActivationMs !== null ? `sttInit=${t.sttActivationMs}ms` : null,
+        t.speechDetectionMs !== null ? `speechWait=${t.speechDetectionMs}ms` : null,
+        t.sttRecognitionMs !== null ? `sttRecog=${t.sttRecognitionMs}ms` : null,
+        t.asrFinalizationMs !== null ? `asrTimer=${t.asrFinalizationMs}ms` : null,
+      ].filter(Boolean).join(', ');
+      turnSummary += `Turn ${t.turnNumber}${flag}: System=${t.systemLatencyMs || '?'}ms | TTS=${t.ttsLatencyMs || '?'}ms | STT[${sttDetail || 'N/A'}] | Engine=${t.engineProcessingMs || '?'}ms (nonLLM=${t.engineNonLlmMs || '?'}ms)${llmDetail ? ' LLM[' + llmDetail + ']' : ''}${apiDetail ? ' API[' + apiDetail + ']' : ''} | User: "${(t.userText || '').substring(0, 50)}" → Amelia: "${(t.ameliaText || '').substring(0, 50)}"\n`;
+    });
+  }
+
+  const botLine = bottleneck ? `\nBOTTLENECK: ${bottleneck.label} at ${bottleneck.ms}ms (${Math.round((bottleneck.ms/total)*100)}% of total)` : '';
+  const payload = `CONVERSATION: ${conversationId}\nTOTAL STAGE LATENCY: ${total}ms${botLine}\n\nLATENCY BY STAGE:\n${latencySummary}${turnSummary}\n\nKEY LOG ENTRIES (${importantLogs.length} of ${filteredLogs.length} total filtered logs):\n${importantLogs.join('\n')}`;
+  return { payload, totalLogs: filteredLogs.length, sentLogs: importantLogs.length, payloadSize: payload.length };
+}
+
+// ═══════════════════════════════════════════════
+// OpenAI — receives ONLY the compact summary
+// ═══════════════════════════════════════════════
+async function analyzeWithOpenAI(config, compactPayload) {
+  const prompt = `You are a latency analysis expert for Amelia AI conversational platform. You are given a PRE-FILTERED, COMPACT summary including the FULL CALL CYCLE per turn: Amelia→EVG→TTS→User→STT→Amelia→Integrations→Amelia. Each turn shows segment-level latencies:
+
+- **TTS**: Text-to-speech synthesis time
+- **STT sub-phases**: STT Activation (Gather:exec → startTranscribing), Speech Detection (waiting for user voice), STT Recognition (partial→final transcript), ASR Finalization (timer wait, typically 2000ms)
+- **Engine (non-LLM)**: NLU, Dialog/BPN execution, routing — everything except LLM calls
+- **LLM Calls**: Individual LLM/ChatCompletion latencies with model names
+- **API Calls**: External integration calls (Submit→Return pairs)
+
+The "System Latency" is what the user perceives as delay — from when they finish speaking to when Amelia starts responding. This includes Engine processing (LLM + non-LLM), webhook round-trip, and TTS synthesis for the response.
+
+Analyze the data and provide:
+1. **Turn-by-Turn Assessment**: Which turns were slowest? Break down WHERE the time is spent (LLM calls? Non-LLM engine? API calls? TTS? STT?). Are there patterns (cold start, certain inputs trigger slow LLMs)?
+2. **Root Cause**: Pinpoint the exact component/stage causing delay. If LLM calls are slow, note the model and latency. If non-LLM engine processing is slow, note whether it's BPN scripts, NLU, or routing. If STT is slow, check if ASR finalization timer is the bottleneck.
+3. **Impact Assessment**: Quantify user experience impact (e.g., "User waits 7.7s after saying 'Yes' — well above the 2s acceptable threshold")
+4. **Potential Fixes**: At least 3 specific, actionable recommendations targeting the identified bottlenecks. Consider: LLM model optimization, ASR timer tuning, API caching, etc.
+5. **Priority**: Rate severity (Critical / High / Medium / Low)
+
+DATA:
+${compactPayload}
+
+Be specific: reference turn numbers, latency values, API service names, and segment breakdowns.`;
+
+  const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${config.openaiApiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: config.openaiModel, messages: [{ role: 'user', content: prompt }], temperature: 0.3, max_tokens: 1500 }),
+  });
+  if (!resp.ok) { const err = await resp.text(); throw new Error(`OpenAI API error (${resp.status}): ${err}`); }
+  const data = await resp.json();
+  return data.choices[0].message.content;
+}
+
+// ═══════════════════════════════════════════════
+// DEMO DATA (used when no files uploaded)
+// ═══════════════════════════════════════════════
+function generateDemoAnalysis(bottleneckStage) {
+  const a = {
+    stt: `**Root Cause:** STT processing is the primary bottleneck at **${bottleneckStage.ms}ms** — well above the 100-200ms threshold.\n\n**Impact:** Users experience noticeable delays before the system begins processing their request.\n\n**Potential Fixes:**\n- **Check STT model version** — ensure the latest optimized model is deployed\n- **Audio quality** — poor quality audio forces more processing cycles\n- **Regional latency** — check if STT service is co-located with the EVG\n- **Concurrency limits** — the STT provider may be throttling under load\n\n**Priority:** Critical`,
+    nlu: `**Root Cause:** NLU Intent Recognition is consuming **${bottleneckStage.ms}ms**, indicating the model is struggling with classification.\n\n**Impact:** The conversation feels sluggish as intent understanding is delayed.\n\n**Potential Fixes:**\n- **Model complexity** — prune unused intents from the NLU model\n- **Entity extraction** — complex regex patterns are expensive; consider caching\n- **Warmup** — model cold-start on first turn; enable pre-warming\n- **Fallback chains** — multiple fallback NLU passes multiply time\n\n**Priority:** High`,
+    dialog: `**Root Cause:** Dialog Management took **${bottleneckStage.ms}ms**, suggesting complex flow execution overhead.\n\n**Impact:** Moderate — adds delay between understanding intent and generating a response.\n\n**Potential Fixes:**\n- **Flow optimization** — review dialog flow for unnecessary branch evaluations\n- **Context size** — large conversation context slows state lookups\n- **Script execution** — check for expensive custom scripts in dialog nodes\n- **Database calls** — synchronous DB lookups should be async\n\n**Priority:** Medium`,
+    api: `**Root Cause:** Backend API call is the bottleneck at **${bottleneckStage.ms}ms**. Most common source of latency.\n\n**Impact:** Severe — users wait for external system responses, blocking the entire pipeline.\n\n**Potential Fixes:**\n- **Backend health** — check the target API's health metrics independently\n- **Timeout configuration** — set aggressive timeouts (2-3s) with fallback responses\n- **Caching** — cache frequently requested data\n- **Connection pooling** — reuse HTTP connections; DNS + TLS handshake adds ~100ms\n- **Async patterns** — consider streaming or webhooks for slow backends\n\n**Priority:** Critical`,
+    response: `**Root Cause:** Response Generation consumed **${bottleneckStage.ms}ms** — template rendering or LLM generation overhead.\n\n**Impact:** Compounds the delay after users have already waited for processing.\n\n**Potential Fixes:**\n- **Template complexity** — simplify; avoid nested conditionals\n- **LLM response** — check token limits and model size\n- **SSML generation** — pre-compile templates for voice output\n- **Debug logging** — excessive logging in the response pipeline adds 50-200ms\n\n**Priority:** High`,
+    tts: `**Root Cause:** TTS Synthesis is taking **${bottleneckStage.ms}ms** — significantly above the 200-400ms norm.\n\n**Impact:** The final spoken response is delayed; users notice this directly.\n\n**Potential Fixes:**\n- **TTS provider** — check if the service is under load or degraded\n- **Voice model** — neural voices take longer; use standard for less critical responses\n- **Text length** — long responses take proportionally longer; consider chunked streaming\n- **SSML complexity** — heavy prosody/break tags increase synthesis time\n- **Caching** — cache TTS output for common phrases\n\n**Priority:** Critical`,
+    evg: `**Root Cause:** EVG Orchestration overhead is **${bottleneckStage.ms}ms** — infrastructure-level inefficiency.\n\n**Impact:** Added to every turn regardless of other stages.\n\n**Potential Fixes:**\n- **Network hops** — check if EVG, Engine, STT, TTS are co-located\n- **Message queue** — check queue depths and consumer lag\n- **Serialization** — trim unnecessary fields from inter-component payloads\n- **Health checks** — circuit breaker trips add retry delays\n\n**Priority:** Medium`,
+  };
+  return a[bottleneckStage.key] || a.api;
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function formatBytes(b) { if (b < 1024) return b + ' B'; if (b < 1048576) return (b/1024).toFixed(1) + ' KB'; return (b/1048576).toFixed(1) + ' MB'; }
+
+function generateDemoClientData() {
+  return ['Acme Corp','Globex Inc','Initech','Umbrella Co','Stark Industries','Wayne Enterprises','Cyberdyne Systems','Oscorp'].map(name => {
+    const base = 200 + Math.random() * 600;
+    return { name, url: `https://${name.toLowerCase().replace(/\s+/g,'-')}.amelia.ai`, id: name.toLowerCase().replace(/\s+/g,'_'),
+      p50: Math.round(base + Math.random()*100), p95: Math.round(base*2.5 + Math.random()*400), p99: Math.round(base*4 + Math.random()*800),
+      totalConversations: Math.round(1000+Math.random()*50000), status: Math.random()>0.8?'degraded':Math.random()>0.95?'down':'healthy' };
+  });
+}
+
+
+// ═══════════════════════════════════════════════
+// COMPONENTS
+// ═══════════════════════════════════════════════
+
+function ConfigModal({ config, onSave, onClose }) {
+  const [local, setLocal] = useState({ ...config });
+  const update = (k, v) => setLocal(p => ({ ...p, [k]: v }));
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-header"><div className="modal-title">Configuration</div><button className="modal-close" onClick={onClose}>x</button></div>
+        <div className="modal-body">
+          <div className="section-title">OpenAI Analysis</div>
+          <div className="form-group">
+            <label className="form-label">API Key</label>
+            <input className="input-field" type="password" value={local.openaiApiKey} onChange={e => update('openaiApiKey', e.target.value)} placeholder="sk-..." />
+            <div className="form-help">Required for AI-powered latency diagnosis</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Model</label>
+            <input className="input-field" value={local.openaiModel} onChange={e => update('openaiModel', e.target.value)} />
+            <div className="form-help">Default: gpt-4.1 (OpenAI 5.4 series)</div>
+          </div>
+          <div className="section-divider"></div>
+          <div className="section-title">Service Account (Page 2)</div>
+          <div className="form-group">
+            <label className="form-label">Service Account Token</label>
+            <input className="input-field" type="password" value={local.serviceAccountToken} onChange={e => update('serviceAccountToken', e.target.value)} placeholder="Placeholder — provide token for monitoring" />
+            <div className="form-help">Required for client monitoring dashboard</div>
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn-primary" onClick={() => { onSave(local); onClose(); }}>Save Configuration</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FileUploadZone({ files, onFilesAdded, onRemoveFile }) {
+  const [dragOver, setDragOver] = useState(false);
+  const inputRef = useRef(null);
+
+  const handleFiles = (fileList) => {
+    const arr = Array.from(fileList).filter(f => f.size > 0);
+    if (arr.length) onFilesAdded(arr);
+  };
+
+  return (
+    <div>
+      <div className={`upload-zone ${dragOver ? 'drag-over' : ''}`}
+        onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={e => { e.preventDefault(); setDragOver(false); handleFiles(e.dataTransfer.files); }}
+        onClick={() => inputRef.current?.click()}>
+        <input ref={inputRef} type="file" multiple accept=".log,.txt,.json,.jsonl,.ndjson,.csv,.gz" onChange={e => { handleFiles(e.target.files); e.target.value = ''; }} />
+        <div className="upload-zone-icon">&#128193;</div>
+        <div className="upload-zone-title">{files.length > 0 ? 'Add more log files' : 'Drop log files here or click to browse'}</div>
+        <div className="upload-zone-desc">Upload Engine Logs and/or EVG Logs — the tool will search through all files for the conversation ID</div>
+        <div className="upload-zone-formats">
+          <span className="format-tag">.log</span><span className="format-tag">.txt</span>
+          <span className="format-tag">.json</span><span className="format-tag">.jsonl</span>
+          <span className="format-tag">.csv</span><span className="format-tag">.ndjson</span>
+        </div>
+      </div>
+      {files.length > 0 && (
+        <div className="uploaded-files">
+          {files.map((f, i) => (
+            <span className="file-chip" key={i}>
+              <span className={`file-chip-source ${f.detectedSource || 'unknown'}`}>{f.detectedSource || '?'}</span>
+              <span className="file-chip-name" title={f.file.name}>{f.file.name}</span>
+              <span className="file-chip-size">{formatBytes(f.file.size)}</span>
+              <button className="file-chip-remove" onClick={e => { e.stopPropagation(); onRemoveFile(i); }} title="Remove">x</button>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProcessingPipeline({ steps }) {
+  return (
+    <div className="card">
+      <div className="card-header"><div className="card-title"><div className="spinner" style={{ width:16,height:16,borderWidth:2 }}></div> Processing Log Pipeline</div></div>
+      <div className="card-body"><div className="pipeline-steps">
+        {steps.map((step) => (
+          <React.Fragment key={step.id}>
+            <div className={`pipeline-step ${step.status}`}>
+              <div className="pipeline-step-icon">{step.status==='done'?'✓':step.status==='running'?'↻':'○'}</div>
+              <div className="pipeline-step-label">{step.label}</div>
+              <div className="pipeline-step-status">{step.status==='done'?'Done':step.status==='running'?'Running...':'Pending'}</div>
+            </div>
+            {step.detail && <div className="pipeline-detail">{step.detail}</div>}
+          </React.Fragment>
+        ))}
+      </div></div>
+    </div>
+  );
+}
+
+function ConversationFlowTimeline({ flow, expandedTurn, onToggleTurn }) {
+  if (!flow || !flow.turns || flow.turns.length === 0) return <div style={{color:'var(--text-muted)',padding:'16px 0',fontSize:13}}>No conversation turns detected</div>;
+  const { turns, stats } = flow;
+  const maxMs = stats.systemWorstMs || 1;
+
+  // Segment colors
+  const SEG_COLORS = {
+    tts: { bg: '#8b5cf6', label: 'TTS' },
+    sttActivation: { bg: '#06b6d4', label: 'STT Init' },
+    speechDetect: { bg: '#6b7280', label: 'Speech Wait' },
+    sttRecognition: { bg: '#14b8a6', label: 'STT Recog' },
+    asrFinal: { bg: '#64748b', label: 'ASR Timer' },
+    engine: { bg: '#ef4444', label: 'Engine' },
+    llm: { bg: '#f97316', label: 'LLM' },
+    api: { bg: '#f59e0b', label: 'API' },
+  };
+
+  return (
+    <div className="waterfall-container">
+      {turns.map((t, i) => {
+        const isWorst = t.turnNumber === stats.systemWorstTurn;
+        const isExp = expandedTurn === i;
+        const sysMs = t.systemLatencyMs || 0;
+        const sysPct = (sysMs / maxMs) * 100;
+        const status = isWorst ? 'critical' : sysMs > stats.systemAvgMs * 1.5 ? 'warning' : 'normal';
+
+        // Build segment bar proportions within the system latency
+        const segments = [];
+        if (t.ttsLatencyMs && sysMs > 0) segments.push({ key: 'tts', ms: t.ttsLatencyMs, pct: (t.ttsLatencyMs / sysMs) * 100 });
+        // Engine: split into Engine (non-LLM, non-API), LLM, and API
+        const enginePart = t.engineProcessingMs || 0;
+        const apiTotal = (t.apiCalls || []).reduce((s, a) => s + a.latencyMs, 0);
+        const llmTotal = t.llmTotalMs || 0;
+        const enginePure = Math.max(0, enginePart - apiTotal - llmTotal);
+        if (enginePure > 0 && sysMs > 0) segments.push({ key: 'engine', ms: enginePure, pct: (enginePure / sysMs) * 100 });
+        if (llmTotal > 0 && sysMs > 0) segments.push({ key: 'llm', ms: llmTotal, pct: (llmTotal / sysMs) * 100 });
+        if (apiTotal > 0 && sysMs > 0) segments.push({ key: 'api', ms: apiTotal, pct: (apiTotal / sysMs) * 100 });
+
+        const userLabel = t.userText ? `"${t.userText.substring(0, 35)}${t.userText.length > 35 ? '...' : ''}"` : `Turn ${t.turnNumber}`;
+
+        return (
+          <React.Fragment key={i}>
+            <div className={`waterfall-row ${isExp?'active':''} ${isWorst?'worst-turn':''}`} onClick={() => onToggleTurn(i)} style={{cursor:'pointer'}}>
+              <div className="waterfall-row-inner">
+                <div className="waterfall-label" style={{minWidth:160}}>
+                  <span style={{opacity:0.5,fontSize:10}}>Turn {t.turnNumber}</span><br/>
+                  <span style={{fontSize:12}}>{userLabel}</span>
+                </div>
+                <div className="waterfall-bar-container">
+                  <div style={{display:'flex',width:`${Math.max(sysPct,12)}%`,height:22,borderRadius:4,overflow:'hidden',border:isWorst?'2px solid var(--accent-red)':'1px solid rgba(255,255,255,0.1)'}}>
+                    {segments.map((seg, si) => (
+                      <div key={si} title={`${SEG_COLORS[seg.key].label}: ${Math.round(seg.ms)}ms`}
+                        style={{width:`${Math.max(seg.pct,5)}%`,background:SEG_COLORS[seg.key].bg,display:'flex',alignItems:'center',justifyContent:'center',fontSize:9,color:'#fff',fontWeight:600,overflow:'hidden',whiteSpace:'nowrap',padding:'0 2px'}}>
+                        {seg.pct > 15 ? `${SEG_COLORS[seg.key].label} ${Math.round(seg.ms)}` : ''}
+                      </div>
+                    ))}
+                    {segments.length === 0 && (
+                      <div style={{width:'100%',background:'var(--accent-blue)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,color:'#fff'}}>{sysMs}ms</div>
+                    )}
+                  </div>
+                  {isWorst && <span style={{marginLeft:8,fontSize:9,color:'var(--accent-red)',fontWeight:700}}>SLOWEST</span>}
+                </div>
+                <div className={`waterfall-value ${status}`} style={{minWidth:80,textAlign:'right'}}>
+                  {sysMs} ms
+                </div>
+                <div className="waterfall-click-hint" style={{transform:isExp?'rotate(90deg)':'none',transition:'transform 0.2s'}}>&#9654;</div>
+              </div>
+            </div>
+            {isExp && (
+              <div className="stage-log-drawer">
+                <div className="stage-log-drawer-header">
+                  <div className="stage-log-drawer-title">Turn {t.turnNumber} — Full Call Cycle</div>
+                  <div className="stage-log-count">{t.evgLogCount} EVG + {t.engineLogCount} Engine logs</div>
+                </div>
+                <div style={{padding:'12px 16px',fontSize:12,lineHeight:1.7,color:'var(--text-secondary)'}}>
+                  {/* Conversation content */}
+                  {t.ameliaText && <div style={{marginBottom:8}}><strong style={{color:'var(--accent-purple)'}}>Amelia:</strong> "{t.ameliaText.substring(0, 200)}{t.ameliaText.length > 200 ? '...' : ''}"</div>}
+                  <div style={{marginBottom:12}}><strong style={{color:'var(--accent-blue)'}}>User:</strong> "{t.userText || '(speech)'}"</div>
+
+                  {/* Segment breakdown table */}
+                  <div style={{background:'rgba(0,0,0,0.2)',borderRadius:6,padding:12,marginBottom:12}}>
+                    <div style={{fontSize:11,fontWeight:700,marginBottom:8,color:'var(--text-primary)'}}>Call Cycle Segments</div>
+                    <div style={{display:'grid',gridTemplateColumns:'160px 80px 1fr',gap:'4px 12px',fontSize:11}}>
+                      <div style={{fontWeight:600,color:'var(--text-muted)'}}>Segment</div>
+                      <div style={{fontWeight:600,color:'var(--text-muted)',textAlign:'right'}}>Latency</div>
+                      <div style={{fontWeight:600,color:'var(--text-muted)'}}>Detail</div>
+
+                      <div style={{color:SEG_COLORS.tts.bg,fontWeight:600}}>TTS Synthesis</div>
+                      <div style={{textAlign:'right'}}>{t.ttsLatencyMs !== null ? t.ttsLatencyMs + 'ms' : '—'}</div>
+                      <div style={{opacity:0.6}}>Voice audio generation</div>
+
+                      <div>Amelia Speaking</div>
+                      <div style={{textAlign:'right',opacity:0.5}}>{t.ameliaDurationMs ? t.ameliaDurationMs + 'ms' : '—'}</div>
+                      <div style={{opacity:0.6}}>Audio playback to user</div>
+
+                      {/* STT Sub-phases */}
+                      <div style={{borderTop:'1px solid rgba(255,255,255,0.06)',paddingTop:4,color:'var(--text-muted)',fontWeight:600,gridColumn:'1 / -1',fontSize:10,letterSpacing:'0.3px'}}>STT / USER INPUT</div>
+
+                      <div style={{paddingLeft:4,color:SEG_COLORS.sttActivation.bg}}>STT Activation</div>
+                      <div style={{textAlign:'right'}}>{t.sttActivationMs !== null ? t.sttActivationMs + 'ms' : '—'}</div>
+                      <div style={{opacity:0.6}}>Gather:exec → _startTranscribing</div>
+
+                      <div style={{paddingLeft:4,color:SEG_COLORS.speechDetect.bg}}>Speech Detection</div>
+                      <div style={{textAlign:'right'}}>{t.speechDetectionMs !== null ? t.speechDetectionMs + 'ms' : '—'}</div>
+                      <div style={{opacity:0.6}}>Waiting for user to speak</div>
+
+                      <div style={{paddingLeft:4,color:SEG_COLORS.sttRecognition.bg}}>STT Recognition</div>
+                      <div style={{textAlign:'right'}}>{t.sttRecognitionMs !== null ? t.sttRecognitionMs + 'ms' : '—'}</div>
+                      <div style={{opacity:0.6}}>Partial → Final transcript</div>
+
+                      <div style={{paddingLeft:4,color:SEG_COLORS.asrFinal.bg}}>ASR Finalization</div>
+                      <div style={{textAlign:'right',color: t.asrFinalizationMs > 2500 ? 'var(--accent-yellow)' : 'inherit'}}>{t.asrFinalizationMs !== null ? t.asrFinalizationMs + 'ms' : '—'}</div>
+                      <div style={{opacity:0.6}}>Timer wait{t.asrTimerValueMs ? ` (${t.asrTimerValueMs}ms configured)` : ''}</div>
+
+                      <div style={{paddingLeft:4,opacity:0.5}}>Total User Phase</div>
+                      <div style={{textAlign:'right',opacity:0.5}}>{t.userDurationMs ? t.userDurationMs + 'ms' : '—'}</div>
+                      <div style={{opacity:0.4}}>Gather:exec → resolve</div>
+
+                      {/* Engine phases */}
+                      <div style={{borderTop:'1px solid rgba(255,255,255,0.06)',paddingTop:4,color:'var(--text-muted)',fontWeight:600,gridColumn:'1 / -1',fontSize:10,letterSpacing:'0.3px'}}>ENGINE PROCESSING</div>
+
+                      <div style={{paddingLeft:4}}>Webhook (EVG→Engine)</div>
+                      <div style={{textAlign:'right'}}>{t.webhookMs !== null ? t.webhookMs + 'ms' : '—'}</div>
+                      <div style={{opacity:0.6}}>HTTP round-trip to Engine</div>
+
+                      <div style={{paddingLeft:4,color:SEG_COLORS.engine.bg,fontWeight:600}}>Engine (non-LLM)</div>
+                      <div style={{textAlign:'right',fontWeight:600,color: (t.engineNonLlmMs || 0) > 3000 ? 'var(--accent-red)' : 'inherit'}}>{t.engineNonLlmMs !== null ? t.engineNonLlmMs + 'ms' : (t.engineProcessingMs ? t.engineProcessingMs + 'ms' : '—')}</div>
+                      <div style={{opacity:0.6}}>NLU, Dialog, BPN, routing</div>
+
+                      {(t.llmCalls || []).map((llm, li) => (
+                        <React.Fragment key={'llm'+li}>
+                          <div style={{paddingLeft:16,color:SEG_COLORS.llm.bg}}>↳ LLM: {llm.model || 'call'}</div>
+                          <div style={{textAlign:'right',color:SEG_COLORS.llm.bg,fontWeight:600}}>{Math.round(llm.latencyMs)}ms</div>
+                          <div style={{opacity:0.5,fontSize:10}}>{llm.detail}</div>
+                        </React.Fragment>
+                      ))}
+
+                      {(t.llmCalls || []).length > 0 && (
+                        <React.Fragment>
+                          <div style={{paddingLeft:16,color:SEG_COLORS.llm.bg,fontWeight:600}}>↳ LLM Total</div>
+                          <div style={{textAlign:'right',color:SEG_COLORS.llm.bg,fontWeight:700}}>{t.llmTotalMs}ms</div>
+                          <div style={{opacity:0.5,fontSize:10}}>{t.llmCalls.length} LLM call(s)</div>
+                        </React.Fragment>
+                      )}
+
+                      {(t.apiCalls || []).map((api, ai) => (
+                        <React.Fragment key={ai}>
+                          <div style={{paddingLeft:16,color:SEG_COLORS.api.bg}}>↳ API: {api.service}</div>
+                          <div style={{textAlign:'right',color:SEG_COLORS.api.bg}}>{Math.round(api.latencyMs)}ms</div>
+                          <div style={{opacity:0.5,fontSize:10}}>Submit→Return pair</div>
+                        </React.Fragment>
+                      ))}
+
+                      <div style={{paddingLeft:4,opacity:0.5}}>Total Engine</div>
+                      <div style={{textAlign:'right',opacity:0.5,color: t.engineProcessingMs > 3000 ? 'var(--accent-red)' : 'inherit'}}>{t.engineProcessingMs ? t.engineProcessingMs + 'ms' : '—'}</div>
+                      <div style={{opacity:0.4}}>{t.engineLogCount} log entries</div>
+
+                      <div style={{borderTop:'1px solid rgba(255,255,255,0.1)',paddingTop:4,fontWeight:700,color:'var(--text-primary)',gridColumn:'1 / -1'}}></div>
+                      <div style={{fontWeight:700,color:'var(--text-primary)'}}>System Wait</div>
+                      <div style={{textAlign:'right',fontWeight:700,color: sysMs > 3000 ? 'var(--accent-red)' : sysMs > 1500 ? 'var(--accent-yellow)' : 'var(--accent-green)'}}>{sysMs}ms</div>
+                      <div style={{opacity:0.6}}>User-perceived delay (Resolve → next Say)</div>
+                    </div>
+                  </div>
+
+                  {/* Timestamps */}
+                  <div style={{opacity:0.5,fontSize:10}}>
+                    <div>Amelia spoke: {t.ameliaSpeakStartTs?.substring(11,23) || '?'} → {t.ameliaSpeakEndTs?.substring(11,23) || '?'}</div>
+                    <div>STT: Gather {t.gatherStartTs?.substring(11,23) || '?'} → Transcribing {t.sttStartTranscribingTs?.substring(11,23) || '?'} → 1st partial {t.firstTranscriptionTs?.substring(11,23) || '?'} → Final {t.lastFinalTranscriptionTs?.substring(11,23) || '?'} → Resolve {t.gatherResolveTs?.substring(11,23) || '?'}</div>
+                    <div>Engine: {t.engineStartTs?.substring(11,23) || '?'} → {t.engineEndTs?.substring(11,23) || '?'}{t.llmCalls?.length > 0 ? ` (LLM: ${t.llmCalls.map(l => l.ts?.substring(11,23) + '=' + l.latencyMs + 'ms').join(', ')})` : ''}</div>
+                  </div>
+
+                  {/* Engine logs for this turn */}
+                  {t.engineLogCount > 0 && (
+                    <div style={{marginTop:12}}>
+                      <div style={{fontSize:11,fontWeight:600,marginBottom:4}}>Engine Logs for Turn {t.turnNumber} ({t.engineLogCount} entries)</div>
+                      <div style={{maxHeight:200,overflow:'auto',background:'rgba(0,0,0,0.15)',borderRadius:4,padding:8}}>
+                        {(t.engineLogEntries || []).slice(0, 30).map((log, j) => (
+                          <div key={j} className={`log-entry ${/warn|error/i.test(log.level)?'log-highlight':''}`} style={{fontSize:10,padding:'2px 0'}}>
+                            <span className="log-ts">{log.ts?.substring(11,23)}</span>{' '}
+                            <span className={`log-level-${(log.level||'').toLowerCase()}`}>[{log.level}]</span>{' '}{(log.msg || '').substring(0, 120)}
+                          </div>
+                        ))}
+                        {t.engineLogCount > 30 && <div style={{fontSize:10,opacity:0.4,paddingTop:4}}>...and {t.engineLogCount - 30} more</div>}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </React.Fragment>
+        );
+      })}
+      {/* Average bar */}
+      <div className="total-latency-bar">
+        <div className="total-label">Average</div>
+        <div className="waterfall-bar-container">
+          <div className="waterfall-bar" style={{width:`${Math.max((stats.systemAvgMs / maxMs) * 100, 8)}%`,background:'linear-gradient(90deg,var(--accent-blue),var(--accent-purple))'}}>{stats.systemAvgMs}ms avg</div>
+        </div>
+        <div className="total-value" style={{color:'var(--accent-blue)',width:80,textAlign:'right'}}>{stats.systemAvgMs} ms</div>
+        <div style={{width:30}}></div>
+      </div>
+      {/* Segment legend — bar-level segments */}
+      <div style={{display:'flex',gap:16,padding:'8px 0',fontSize:10,opacity:0.7,flexWrap:'wrap'}}>
+        {[['tts','TTS'],['engine','Engine (non-LLM)'],['llm','LLM Calls'],['api','API Calls']].map(([k, label]) => (
+          <div key={k} style={{display:'flex',alignItems:'center',gap:4}}>
+            <div style={{width:10,height:10,borderRadius:2,background:SEG_COLORS[k].bg}}></div>{label}
+          </div>
+        ))}
+        <div style={{opacity:0.5}}>| Click turn for STT sub-phases + LLM detail</div>
+      </div>
+    </div>
+  );
+}
+
+function StageBreakdownChart({ latencies, stageLogs, expandedStage, onToggleStage }) {
+  if (!latencies || latencies.length === 0) return null;
+  const withMs = latencies.filter(l => l.ms > 0);
+  const maxMs = withMs.length > 0 ? Math.max(...withMs.map(l => l.ms)) : 1;
+  const getStatus = (ms) => ms > 1000 ? 'critical' : ms > 400 ? 'warning' : 'normal';
+  return (
+    <div className="waterfall-container">
+      {latencies.map((l, i) => {
+        const hasLatency = l.ms > 0;
+        const pct = hasLatency ? (l.ms / maxMs) * 100 : 0;
+        const status = hasLatency ? getStatus(l.ms) : 'normal';
+        const isExp = expandedStage === l.key; const logs = stageLogs[l.key] || [];
+        return (
+          <React.Fragment key={i}>
+            <div className={`waterfall-row ${isExp?'active':''}`} onClick={() => onToggleStage(l.key)}>
+              <div className="waterfall-row-inner">
+                <div className="waterfall-label"><span style={{opacity:0.5,fontSize:11}}>{l.source}</span><br/>{l.label}</div>
+                <div className="waterfall-bar-container">
+                  {hasLatency ? (
+                    <div className={`waterfall-bar ${status}`} style={{width:`${Math.max(pct,8)}%`}}>{l.ms >= 1 ? Math.round(l.ms) : l.ms.toFixed(2)}ms</div>
+                  ) : (
+                    <div style={{padding:'4px 12px',fontSize:11,color:'var(--text-muted)',fontStyle:'italic'}}>{l.count} log entries (no explicit latency values)</div>
+                  )}
+                </div>
+                <div className={`waterfall-value ${status}`}>
+                  {hasLatency ? (<>{l.ms >= 1 ? Math.round(l.ms) : l.ms.toFixed(2)} ms
+                    {l.method && <span style={{display:'block',fontSize:9,opacity:0.5,fontWeight:400}}>{l.method === 'explicit' ? 'log value' : l.method === 'computed' ? 'avg (computed)' : ''}</span>}
+                  </>) : (
+                    <span style={{fontSize:11,opacity:0.5}}>{l.count} entries</span>
+                  )}
+                </div>
+                <div className="waterfall-click-hint" style={{transform:isExp?'rotate(90deg)':'none',transition:'transform 0.2s'}}>&#9654;</div>
+              </div>
+              {l.detail && <div style={{padding:'2px 16px 6px',fontSize:11,color:'var(--accent-blue)',opacity:0.8}}>{l.detail}</div>}
+            </div>
+            {isExp && (
+              <div className="stage-log-drawer">
+                <div className="stage-log-drawer-header"><div className="stage-log-drawer-title">{l.label} — Filtered Logs</div><div className="stage-log-count">{logs.length} entries</div></div>
+                {logs.length === 0 ? <div className="stage-log-empty">No log entries classified to this stage</div> :
+                  logs.slice(0, 50).map((log, j) => (
+                    <div className={`log-entry ${/warn|error/i.test(log.level)?'log-highlight':''}`} key={j}>
+                      <span className="log-ts">{log.ts}</span>{' '}
+                      <span className={`log-level-${log.level.toLowerCase()}`}>[{log.level}]</span>{' '}{log.msg}
+                    </div>
+                  ))
+                }
+                {logs.length > 50 && <div style={{padding:'8px 16px',fontSize:11,opacity:0.5}}>...and {logs.length - 50} more entries</div>}
+              </div>
+            )}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
+function LogViewer({ engineLogs, evgLogs }) {
+  const [tab, setTab] = useState('engine');
+  const logs = tab === 'engine' ? engineLogs : evgLogs;
+  return (
+    <div>
+      <div className="log-tabs">
+        <button className={`log-tab ${tab==='engine'?'active':''}`} onClick={() => setTab('engine')}>Engine Logs ({engineLogs.length})</button>
+        <button className={`log-tab ${tab==='evg'?'active':''}`} onClick={() => setTab('evg')}>EVG / STT / TTS Logs ({evgLogs.length})</button>
+      </div>
+      {logs.length === 0 ? <div style={{color:'var(--text-muted)',fontSize:13,padding:'12px 0'}}>No logs in this category</div> :
+        logs.map((log, i) => (
+          <div className={`log-entry ${/warn|error/i.test(log.level)?'log-highlight':''}`} key={i}>
+            <span className="log-ts">{log.ts}</span>{' '}
+            <span className={`log-level-${log.level.toLowerCase()}`}>[{log.level}]</span>{' '}{log.msg}
+          </div>
+        ))
+      }
+    </div>
+  );
+}
+
+function AIAnalysis({ analysis, loading, payloadInfo }) {
+  if (loading) return (
+    <div className="ai-analysis">
+      <div className="ai-header"><span>AI Analysis</span><div className="spinner" style={{width:16,height:16,borderWidth:2}}></div></div>
+      <div className="loading-skeleton" style={{width:'90%'}}></div><div className="loading-skeleton" style={{width:'75%'}}></div>
+      <div className="loading-skeleton" style={{width:'85%'}}></div><div className="loading-skeleton" style={{width:'60%'}}></div>
+    </div>
+  );
+  if (!analysis) return null;
+  const fmt = (text) => text.split('\n').map((line, i) => {
+    line = line.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    line = line.replace(/`(.*?)`/g, '<code style="background:rgba(139,92,246,0.15);padding:2px 6px;border-radius:4px;font-size:12px;">$1</code>');
+    if (line.startsWith('- ')) return <li key={i} dangerouslySetInnerHTML={{__html:line.slice(2)}} />;
+    if (!line.trim()) return <br key={i} />;
+    return <p key={i} dangerouslySetInnerHTML={{__html:line}} style={{margin:'4px 0'}} />;
+  });
+  return (
+    <div>
+      <div className="ai-analysis">
+        <div className="ai-header"><span>AI-Powered Analysis</span><span style={{fontSize:11,opacity:0.6}}>(OpenAI 5.4)</span></div>
+        <div className="ai-content">{fmt(analysis)}</div>
+      </div>
+      {payloadInfo && <div className="payload-summary">
+        <span>Sent to LLM:</span> <strong>{payloadInfo.sentLogs}</strong> key entries from <strong>{payloadInfo.totalLogs}</strong> filtered
+        <span>|</span> <strong>{(payloadInfo.payloadSize/1024).toFixed(1)}KB</strong> compact summary (not raw files)
+      </div>}
+    </div>
+  );
+}
+
+
+// ═══════════════════════════════════════════════
+// PAGE 1: Conversation Troubleshooter
+// ═══════════════════════════════════════════════
+function Page1({ config, onOpenSettings }) {
+  const [conversationId, setConversationId] = useState('');
+  const [callId, setCallId] = useState('');
+  const [uploadedFiles, setUploadedFiles] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [results, setResults] = useState(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiAnalysis, setAiAnalysis] = useState(null);
+  const [error, setError] = useState(null);
+  const [expandedStage, setExpandedStage] = useState(null);
+  const [expandedTurn, setExpandedTurn] = useState(null);
+  const [pipelineSteps, setPipelineSteps] = useState([]);
+
+  const onFilesAdded = (newFiles) => {
+    const items = newFiles.map(f => {
+      const n = f.name.toLowerCase();
+      let src = 'unknown';
+      if (/engine|amelia|nlu|dialog/i.test(n)) src = 'engine';
+      else if (/evg|stt|tts|voice|speech|gateway/i.test(n)) src = 'evg';
+      return { file: f, detectedSource: src };
+    });
+    setUploadedFiles(prev => [...prev, ...items]);
+  };
+
+  const onRemoveFile = (idx) => setUploadedFiles(prev => prev.filter((_, i) => i !== idx));
+
+  const updateStep = (id, status, detail) => {
+    setPipelineSteps(prev => prev.map(s => s.id === id ? { ...s, status, detail: detail || s.detail } : s));
+  };
+
+  const handleAnalyze = async () => {
+    if ((!conversationId.trim() && !callId.trim()) || uploadedFiles.length === 0) return;
+    setLoading(true); setError(null); setResults(null); setAiAnalysis(null); setExpandedStage(null); setExpandedTurn(null);
+
+    const STEPS = [
+      { id: 'read_files', label: `Reading ${uploadedFiles.length} uploaded log file(s)`, status: 'pending', detail: null },
+      { id: 'filter_engine', label: 'Filtering Engine Logs by Conversation ID', status: 'pending', detail: null },
+      { id: 'filter_evg', label: 'Filtering EVG Logs by Call ID', status: 'pending', detail: null },
+      { id: 'combine', label: 'Combining Engine + EVG results into unified timeline', status: 'pending', detail: null },
+      { id: 'classify', label: 'Classifying logs into pipeline stages (STT, NLU, Dialog, API, TTS, EVG)', status: 'pending', detail: null },
+      { id: 'build_summary', label: 'Building compact summary for LLM (not sending raw logs)', status: 'pending', detail: null },
+      { id: 'ai_analyze', label: 'Sending compact payload to OpenAI for analysis', status: 'pending', detail: null },
+    ];
+    setPipelineSteps(STEPS);
+
+    try {
+      // Step 1: Read all files
+      updateStep('read_files', 'running');
+      const allParsedEntries = [];
+      let totalLines = 0;
+      let totalBytes = 0;
+
+      for (const uf of uploadedFiles) {
+        const text = await uf.file.text();
+        totalBytes += uf.file.size;
+        const entries = parseLogFile(text, uf.file.name);
+        totalLines += text.split('\n').length;
+        allParsedEntries.push(...entries);
+      }
+      updateStep('read_files', 'done', `Parsed ${allParsedEntries.length.toLocaleString()} log entries from ${uploadedFiles.length} files (${formatBytes(totalBytes)}, ${totalLines.toLocaleString()} lines)`);
+
+      // Step 2a: Filter Engine Logs by Conversation ID
+      const cid = conversationId.trim();
+      const clid = callId.trim();
+      let engineFiltered = [];
+      let evgFiltered = [];
+
+      if (cid) {
+        updateStep('filter_engine', 'running');
+        await sleep(50);
+        const engineEntries = allParsedEntries.filter(e => e.fileSource === 'engine' || e.fileSource === 'unknown');
+        engineFiltered = engineEntries.filter(e => {
+          // Try structured field match first (Engine: conversationId)
+          if (e.conversationId && e.conversationId === cid) return true;
+          // Fallback: string search
+          return e.msg?.includes(cid) || e.raw?.includes(cid);
+        });
+        updateStep('filter_engine', 'done', `Found ${engineFiltered.length} Engine log entries matching Conversation ID "${cid}" (from ${engineEntries.length.toLocaleString()} engine entries)`);
+      } else {
+        updateStep('filter_engine', 'done', 'Skipped — no Conversation ID provided');
+      }
+
+      // Step 2b: Filter EVG Logs by Call ID (with auto-discovery of jambonz callId from sbcCallid)
+      if (clid) {
+        updateStep('filter_evg', 'running');
+        await sleep(50);
+        const evgEntries = allParsedEntries.filter(e => e.fileSource === 'evg' || e.fileSource === 'unknown');
+
+        // First pass: direct match on callId, sbcCallid, or raw string
+        let initialMatch = evgEntries.filter(e => {
+          if (e.callId && e.callId === clid) return true;
+          if (e.sbcCallid && e.sbcCallid === clid) return true;
+          return e.msg?.includes(clid) || e.raw?.includes(clid);
+        });
+
+        // Auto-discover: if user provided an sbcCallid, find the actual jambonz callId and re-filter
+        // The sbcCallid appears in only a few entries, but the real callId appears in all entries for the call
+        const discoveredCallIds = new Set();
+        initialMatch.forEach(e => {
+          if (e.callId && e.callId !== clid) discoveredCallIds.add(e.callId);
+        });
+
+        if (discoveredCallIds.size > 0) {
+          // Re-filter using discovered jambonz callId(s) — this catches ALL entries for the call
+          evgFiltered = evgEntries.filter(e => {
+            if (e.callId && (e.callId === clid || discoveredCallIds.has(e.callId))) return true;
+            if (e.sbcCallid && e.sbcCallid === clid) return true;
+            return false;
+          });
+          const discIds = [...discoveredCallIds].join(', ');
+          updateStep('filter_evg', 'done', `Found ${evgFiltered.length} EVG entries (auto-discovered jambonz callId: ${discIds} from SBC Call ID "${clid}")`);
+        } else {
+          evgFiltered = initialMatch;
+          updateStep('filter_evg', 'done', `Found ${evgFiltered.length} EVG log entries matching Call ID "${clid}" (from ${evgEntries.length.toLocaleString()} EVG entries)`);
+        }
+      } else {
+        updateStep('filter_evg', 'done', 'Skipped — no Call ID provided');
+      }
+
+      // Step 2c: Combine
+      updateStep('combine', 'running');
+      await sleep(50);
+      const filtered = [...engineFiltered, ...evgFiltered];
+      filtered.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+      updateStep('combine', 'done', `Combined ${engineFiltered.length} Engine + ${evgFiltered.length} EVG = ${filtered.length} total conversation logs`);
+
+      if (filtered.length === 0) {
+        const hints = [];
+        if (cid) hints.push(`Conversation ID "${cid}" in Engine Logs`);
+        if (clid) hints.push(`Call ID "${clid}" in EVG Logs`);
+        setError(`No log entries found matching ${hints.join(' or ')} across ${uploadedFiles.length} file(s). Check that the IDs are correct and that files are categorized properly (Engine vs EVG).`);
+        setLoading(false); return;
+      }
+
+      // Step 3: Classify into stages
+      updateStep('classify', 'running');
+      await sleep(50);
+      const stageLogs = {};
+      STAGE_CLASSIFIERS.forEach(s => { stageLogs[s.key] = []; });
+      let uncatCount = 0;
+      filtered.forEach(log => {
+        const key = classifyLogEntry(log);  // Pass the entire entry object for structured field access
+        if (key === 'uncategorized') { uncatCount++; }
+        else { stageLogs[key].push(log); }
+      });
+
+      // Compute Submit/Return API pair latencies from Engine logs
+      const apiPairLatencies = computeSubmitReturnLatencies(engineFiltered);
+
+      // Build stage latencies — from explicit latency values in log messages + computed pairs
+      // (timestamp_delta removed: it spans the whole conversation and produces nonsensical values)
+      const latencies = STAGE_CLASSIFIERS.map(s => {
+        const logs = stageLogs[s.key];
+        if (logs.length === 0 && !(s.key === 'api' && apiPairLatencies.length > 0)) {
+          return { ...s, ms: 0, method: 'none', count: 0 };
+        }
+
+        // Collect ALL explicit latency values from log messages in this stage
+        const explicitValues = [];
+        logs.forEach(l => {
+          const ms = extractLatencyMs(l.msg);
+          if (ms && ms > 0) explicitValues.push(ms);
+        });
+
+        // For the API stage, also include computed Submit/Return pair latencies
+        if (s.key === 'api' && apiPairLatencies.length > 0) {
+          apiPairLatencies.forEach(p => explicitValues.push(p.latencyMs));
+        }
+
+        if (explicitValues.length > 0) {
+          const maxVal = Math.max(...explicitValues);
+          const avgVal = explicitValues.reduce((s, v) => s + v, 0) / explicitValues.length;
+          const detail = s.key === 'api' && apiPairLatencies.length > 0
+            ? `${apiPairLatencies.length} API calls: ${apiPairLatencies.map(p => p.service + '=' + Math.round(p.latencyMs) + 'ms').join(', ')}`
+            : null;
+          return { ...s, ms: Math.round(maxVal * 100) / 100, avgMs: Math.round(avgVal * 100) / 100, method: 'explicit', count: explicitValues.length, detail };
+        }
+
+        // No explicit latency found — show log count but no bar
+        return { ...s, ms: 0, method: 'none', count: logs.length };
+      }).filter(l => l.ms > 0 || l.count > 0);
+
+      // ── FULL CONVERSATION FLOW ──
+      const conversationFlow = buildConversationFlow(evgFiltered, engineFiltered, apiPairLatencies);
+      const allTurns = conversationFlow.turns;
+      const turnStats = conversationFlow.stats;
+
+      // ── Enrich Stage Breakdown with computed latencies from conversation flow ──
+      // The flow builder computes real latencies from timestamp deltas between boundary events.
+      // Feed these back into the stage latencies so the Stage Breakdown shows real values
+      // instead of "no explicit latency values".
+      if (allTurns.length > 0) {
+        const computedStageLatencies = {
+          stt: {
+            values: allTurns.map(t => {
+              // Total STT time = sttActivation + speechDetection + sttRecognition + asrFinalization
+              const parts = [t.sttActivationMs, t.speechDetectionMs, t.sttRecognitionMs, t.asrFinalizationMs].filter(v => v !== null && v > 0);
+              return parts.length > 0 ? parts.reduce((s,v) => s+v, 0) : null;
+            }).filter(v => v !== null),
+            detail: () => {
+              const avgActivation = Math.round(allTurns.map(t => t.sttActivationMs).filter(v => v !== null && v > 0).reduce((s,v,_,a) => s+v/a.length, 0)) || 0;
+              const avgSpeechDetect = Math.round(allTurns.map(t => t.speechDetectionMs).filter(v => v !== null && v > 0).reduce((s,v,_,a) => s+v/a.length, 0)) || 0;
+              const avgRecognition = Math.round(allTurns.map(t => t.sttRecognitionMs).filter(v => v !== null && v > 0).reduce((s,v,_,a) => s+v/a.length, 0)) || 0;
+              const avgAsr = Math.round(allTurns.map(t => t.asrFinalizationMs).filter(v => v !== null && v > 0).reduce((s,v,_,a) => s+v/a.length, 0)) || 0;
+              return `Avg: STT init ${avgActivation}ms, speech wait ${avgSpeechDetect}ms, recognition ${avgRecognition}ms, ASR timer ${avgAsr}ms`;
+            },
+          },
+          tts: {
+            values: allTurns.map(t => t.ttsLatencyMs).filter(v => v !== null && v > 0),
+            detail: () => `Avg TTS synthesis: ${turnStats.ttsAvgMs}ms across ${allTurns.filter(t => t.ttsLatencyMs > 0).length} turns`,
+          },
+          response: {
+            values: allTurns.flatMap(t => (t.llmCalls || []).map(l => l.latencyMs)).filter(v => v > 0),
+            detail: () => {
+              const allLlm = allTurns.flatMap(t => (t.llmCalls || []));
+              if (allLlm.length === 0) return null;
+              return `${allLlm.length} LLM calls: ${allLlm.map(l => l.model + '=' + Math.round(l.latencyMs) + 'ms').join(', ')}`;
+            },
+          },
+          dialog: {
+            values: allTurns.map(t => t.engineNonLlmMs).filter(v => v !== null && v > 0),
+            detail: () => `Avg Engine (non-LLM) processing: ${Math.round(allTurns.map(t => t.engineNonLlmMs).filter(v => v !== null && v > 0).reduce((s,v,_,a) => s+v/a.length, 0))}ms`,
+          },
+          evg: {
+            values: allTurns.map(t => t.webhookMs).filter(v => v !== null && v > 0),
+            detail: () => `Avg webhook round-trip: ${Math.round(allTurns.map(t => t.webhookMs).filter(v => v !== null && v > 0).reduce((s,v,_,a) => s+v/a.length, 0))}ms`,
+          },
+        };
+
+        latencies.forEach((lat, idx) => {
+          const computed = computedStageLatencies[lat.key];
+          if (computed && computed.values.length > 0 && lat.ms === 0) {
+            // Stage had no explicit log-message latency but we have computed values from flow
+            const maxVal = Math.max(...computed.values);
+            const avgVal = computed.values.reduce((s, v) => s + v, 0) / computed.values.length;
+            const detailStr = typeof computed.detail === 'function' ? computed.detail() : null;
+            latencies[idx] = {
+              ...lat,
+              ms: Math.round(avgVal * 100) / 100,
+              maxMs: Math.round(maxVal * 100) / 100,
+              avgMs: Math.round(avgVal * 100) / 100,
+              method: 'computed',
+              count: computed.values.length,
+              detail: detailStr || lat.detail,
+            };
+          } else if (computed && computed.values.length > 0 && lat.ms > 0) {
+            // Stage already has explicit latency — add computed detail as supplementary info
+            const detailStr = typeof computed.detail === 'function' ? computed.detail() : null;
+            if (detailStr && !lat.detail) {
+              latencies[idx] = { ...lat, detail: detailStr };
+            }
+          }
+        });
+      }
+
+      updateStep('classify', 'done', `${allTurns.length} conversation turns mapped (avg system latency: ${turnStats.systemAvgMs}ms), ${latencies.length} stages classified (${uncatCount} uncategorized)`);
+
+      if (allTurns.length === 0 && latencies.length === 0) {
+        setError(`Found ${filtered.length} matching logs but couldn't map conversation turns or extract stage latencies. Ensure both EVG and Engine logs are uploaded with correct IDs.`);
+        setLoading(false); return;
+      }
+
+      // Compute total conversation duration from all filtered logs
+      const allFilteredTimes = filtered.map(e => {
+        if (!e.ts) return NaN;
+        try { return new Date(e.ts).getTime(); } catch(err) { return NaN; }
+      }).filter(t => !isNaN(t));
+      const totalConvDuration = allFilteredTimes.length >= 2
+        ? Math.max(...allFilteredTimes) - Math.min(...allFilteredTimes)
+        : (turnStats?.totalDurationMs || 0);
+
+      const total = latencies.reduce((s, l) => s + l.ms, 0);
+      const bottleneckIdx = latencies.length > 0 ? latencies.reduce((maxI, l, i, arr) => l.ms > arr[maxI].ms ? i : maxI, 0) : -1;
+      const bottleneckStage = bottleneckIdx >= 0 ? latencies[bottleneckIdx] : null;
+
+      // Step 4: Build compact LLM payload
+      updateStep('build_summary', 'running');
+      const idLabel = [cid ? `ConversationID=${cid}` : '', clid ? `CallID=${clid}` : ''].filter(Boolean).join(', ');
+      const turnData = allTurns.length > 0 ? { turns: allTurns, stats: turnStats, flow: conversationFlow } : null;
+      const llmPayloadInfo = buildLLMPayload(filtered, latencies, idLabel, turnData);
+      updateStep('build_summary', 'done', `Compact payload: ${llmPayloadInfo.sentLogs} key logs from ${llmPayloadInfo.totalLogs} total (${(llmPayloadInfo.payloadSize/1024).toFixed(1)}KB)`);
+
+      const engineLogEntries = filtered.filter(l => l.fileSource === 'engine');
+      const evgLogEntries = filtered.filter(l => l.fileSource === 'evg');
+
+      const data = {
+        latencies, total, stageLogs, allFilteredLogs: filtered,
+        bottleneckIdx, bottleneckStage, apiPairLatencies,
+        engineLogs: engineLogEntries, evgLogs: evgLogEntries,
+        scannedTotal: allParsedEntries.length, filteredCount: filtered.length, llmPayloadInfo,
+        conversationFlow, turns: allTurns, turnStats, totalConvDuration,
+      };
+
+      setResults(data);
+      setLoading(false);
+
+      // Step 5: AI Analysis
+      updateStep('ai_analyze', 'running');
+      setAiLoading(true);
+      if (!config.openaiApiKey) {
+        await sleep(1500);
+        const demoStage = bottleneckStage || { key: 'evg', ms: turnStats?.worstMs || 0, label: 'EVG Orchestration' };
+        setAiAnalysis(generateDemoAnalysis(demoStage));
+        updateStep('ai_analyze', 'done', 'Analysis complete (demo — configure OpenAI key for live)');
+      } else {
+        const analysis = await analyzeWithOpenAI(config, llmPayloadInfo.payload);
+        setAiAnalysis(analysis);
+        updateStep('ai_analyze', 'done', 'Analysis complete');
+      }
+      setAiLoading(false);
+
+    } catch (err) {
+      setError(err.message);
+      setLoading(false); setAiLoading(false);
+    }
+  };
+
+  const hasAtLeastOneId = conversationId.trim() || callId.trim();
+  const canAnalyze = hasAtLeastOneId && uploadedFiles.length > 0 && !loading;
+
+  return (
+    <div>
+      <div className="page-header">
+        <div className="page-title">Troubleshoot Conversation Latency</div>
+        <div className="page-subtitle">Upload log files and provide the Conversation ID (for Engine Logs) and/or Call ID (for EVG Logs)</div>
+      </div>
+      <div className="page-body">
+        <FileUploadZone files={uploadedFiles} onFilesAdded={onFilesAdded} onRemoveFile={onRemoveFile} />
+
+        <div className="search-section">
+          <div className="input-group">
+            <div className="input-label">Conversation ID <span style={{opacity:0.5,textTransform:'none',fontWeight:400}}>(Engine Logs)</span></div>
+            <input className="input-field" value={conversationId} onChange={e => setConversationId(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && canAnalyze && handleAnalyze()}
+              placeholder="Used to search Engine Logs" />
+          </div>
+          <div className="input-group">
+            <div className="input-label">Call ID <span style={{opacity:0.5,textTransform:'none',fontWeight:400}}>(EVG / STT / TTS Logs)</span></div>
+            <input className="input-field" value={callId} onChange={e => setCallId(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && canAnalyze && handleAnalyze()}
+              placeholder="Used to search EVG Logs" />
+          </div>
+          <button className="btn-primary" onClick={handleAnalyze} disabled={!canAnalyze}>
+            {loading ? <><div className="spinner"></div> Processing...</> : 'Analyze Logs'}
+          </button>
+        </div>
+
+        {!config.openaiApiKey && (
+          <div className="card" style={{borderColor:'rgba(139,92,246,0.3)',marginBottom:20}}>
+            <div className="card-body" style={{display:'flex',alignItems:'center',gap:16,flexWrap:'wrap'}}>
+              <div style={{flex:1,minWidth:200}}>
+                <div style={{fontSize:14,fontWeight:600,color:'var(--accent-purple)',marginBottom:4}}>OpenAI API Key Required for AI Analysis</div>
+                <div style={{fontSize:12,color:'var(--text-muted)',lineHeight:1.5}}>
+                  The tool uses OpenAI's GPT-4.1 model to analyze log patterns and suggest fixes.
+                  Without a key, analysis falls back to basic templates. Add your key in Settings.
+                </div>
+              </div>
+              <button className="btn-primary" style={{background:'var(--accent-purple)',flexShrink:0}} onClick={onOpenSettings}>
+                Configure API Key
+              </button>
+            </div>
+          </div>
+        )}
+
+        {error && <div className="card" style={{borderColor:'rgba(239,68,68,0.3)'}}><div className="card-body" style={{color:'var(--accent-red)'}}><strong>Error:</strong> {error}</div></div>}
+
+        {(loading || aiLoading) && pipelineSteps.length > 0 && <ProcessingPipeline steps={pipelineSteps} />}
+
+        {results && (<>
+          <div className="stats-grid">
+            {results.turnStats && results.turnStats.turnCount > 0 ? (<>
+              <div className="stat-card"><div className="stat-label">Avg System Latency</div>
+                <div className="stat-value" style={{color: results.turnStats.systemAvgMs>3000?'var(--accent-red)':results.turnStats.systemAvgMs>1500?'var(--accent-yellow)':'var(--accent-green)'}}>{results.turnStats.systemAvgMs}<span style={{fontSize:14,opacity:0.6}}>ms</span></div>
+                <div className="stat-sub">User-perceived wait across {results.turnStats.turnCount} turns</div></div>
+              <div className="stat-card"><div className="stat-label">Slowest Turn</div>
+                <div className="stat-value" style={{color:'var(--accent-red)'}}>{results.turnStats.systemWorstMs}<span style={{fontSize:14,opacity:0.6}}>ms</span></div>
+                <div className="stat-sub">Turn {results.turnStats.systemWorstTurn} | Engine avg: {results.turnStats.engineAvgMs}ms</div></div>
+              <div className="stat-card"><div className="stat-label">Conversation</div>
+                <div className="stat-value">{(results.turnStats.totalConversationMs / 1000).toFixed(1)}<span style={{fontSize:14,opacity:0.6}}>s</span></div>
+                <div className="stat-sub">{results.turnStats.turnCount} turns | TTS avg: {results.turnStats.ttsAvgMs}ms | LLM avg: {results.turnStats.llmAvgMs}ms | P95: {results.turnStats.systemP95Ms}ms</div></div>
+            </>) : (<>
+              <div className="stat-card"><div className="stat-label">Total Stage Latency</div>
+                <div className="stat-value" style={{color: results.total>3000?'var(--accent-red)':results.total>1500?'var(--accent-yellow)':'var(--accent-green)'}}>{results.total}<span style={{fontSize:14,opacity:0.6}}>ms</span></div>
+                <div className="stat-sub">End-to-end</div></div>
+              {results.bottleneckStage && <div className="stat-card"><div className="stat-label">Bottleneck</div>
+                <div className="stat-value" style={{color:'var(--accent-red)',fontSize:18}}>{results.bottleneckStage.label}</div>
+                <div className="stat-sub">{results.bottleneckStage.ms}ms — {results.bottleneckStage.source}</div></div>}
+            </>)}
+            <div className="stat-card"><div className="stat-label">Logs Matched</div>
+              <div className="stat-value">{results.filteredCount}</div>
+              <div className="stat-sub">From {results.scannedTotal?.toLocaleString()} scanned ({results.engineLogs?.length || 0} Engine + {results.evgLogs?.length || 0} EVG)</div></div>
+            <div className="stat-card"><div className="stat-label">Health</div><div className="stat-value">
+              {(() => {
+                const checkMs = results.turnStats?.systemAvgMs || results.total;
+                return checkMs<1500?<span className="badge badge-green"><span className="badge-dot"></span> Healthy</span>:
+                 checkMs<3000?<span className="badge badge-yellow"><span className="badge-dot"></span> Degraded</span>:
+                 <span className="badge badge-red"><span className="badge-dot"></span> Critical</span>;
+              })()}
+            </div><div className="stat-sub">Based on {results.turnStats?.turnCount > 0 ? 'avg system latency' : 'total latency'}</div></div>
+          </div>
+
+          {results.conversationFlow && results.conversationFlow.turns.length > 0 && (
+            <div className="card">
+              <div className="card-header">
+                <div className="card-title">Conversation Flow Timeline</div>
+                <span style={{fontSize:12,color:'var(--text-muted)'}}>Full call cycle: Amelia → TTS → User → STT → Engine → Integrations → Amelia. Click a turn to drill down.</span>
+              </div>
+              <div className="card-body">
+                <ConversationFlowTimeline flow={results.conversationFlow} expandedTurn={expandedTurn} onToggleTurn={i => setExpandedTurn(p => p===i?null:i)} />
+                {results.turnStats && results.turnStats.systemWorstTurn && (
+                  <div className="pinpoint-indicator">
+                    <span><strong>Slowest:</strong> Turn {results.turnStats.systemWorstTurn} at {results.turnStats.systemWorstMs}ms
+                    {results.conversationFlow.turns.find(t => t.turnNumber === results.turnStats.systemWorstTurn)?.userText &&
+                      ` — user said "${results.conversationFlow.turns.find(t => t.turnNumber === results.turnStats.systemWorstTurn).userText.substring(0, 60)}"`}
+                    {' '}| Avg: {results.turnStats.systemAvgMs}ms | Median: {results.turnStats.systemMedianMs}ms | P95: {results.turnStats.systemP95Ms}ms</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {results.latencies && results.latencies.length > 0 && (
+            <div className="card">
+              <div className="card-header"><div className="card-title">Stage Breakdown</div><span style={{fontSize:12,color:'var(--text-muted)'}}>Latency by pipeline stage — click to expand logs</span></div>
+              <div className="card-body">
+                <StageBreakdownChart latencies={results.latencies} stageLogs={results.stageLogs} expandedStage={expandedStage} onToggleStage={k => setExpandedStage(p => p===k?null:k)} />
+                {results.bottleneckStage && (
+                  <div className="pinpoint-indicator" style={{marginTop:8}}><span><strong>Stage bottleneck:</strong> {results.bottleneckStage.label} ({results.bottleneckStage.source}) at {results.bottleneckStage.ms}ms</span></div>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="card">
+            <div className="card-header"><div className="card-title">Intelligent Analysis</div>
+              {!config.openaiApiKey && <span style={{fontSize:11,color:'var(--text-muted)'}}>Demo — configure OpenAI key for live</span>}
+            </div>
+            <div className="card-body"><AIAnalysis analysis={aiAnalysis} loading={aiLoading} payloadInfo={results.llmPayloadInfo} /></div>
+          </div>
+
+          <div className="card">
+            <div className="card-header"><div className="card-title">All Filtered Logs ({results.filteredCount})</div><span style={{fontSize:12,color:'var(--text-muted)'}}>Only logs matching conversation/call ID</span></div>
+            <div className="card-body"><LogViewer engineLogs={results.engineLogs} evgLogs={results.evgLogs} /></div>
+          </div>
+        </>)}
+
+        {!results && !loading && uploadedFiles.length === 0 && (
+          <div className="empty-state">
+            <div className="empty-icon">&#128194;</div>
+            <div className="empty-title">Upload Log Files to Get Started</div>
+            <div className="empty-desc">
+              Drop your Engine Logs and EVG Logs above. Engine Logs are searched by Conversation ID,
+              EVG Logs are searched by Call ID. The tool classifies entries by stage and pinpoints the bottleneck.
+              Only a compact summary is sent to OpenAI for analysis — never the raw files.
+            </div>
+          </div>
+        )}
+
+        {!results && !loading && uploadedFiles.length > 0 && (
+          <div className="empty-state">
+            <div className="empty-icon">&#128270;</div>
+            <div className="empty-title">Enter Conversation ID and/or Call ID</div>
+            <div className="empty-desc">
+              {uploadedFiles.length} file(s) loaded ({formatBytes(uploadedFiles.reduce((s,f)=>s+f.file.size,0))}).
+              Enter a Conversation ID (to search Engine Logs) and/or a Call ID (to search EVG Logs), then click Analyze.
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+// ═══════════════════════════════════════════════
+// PAGE 2: Client Monitoring Dashboard
+// ═══════════════════════════════════════════════
+function Page2({ config }) {
+  const [timePeriod, setTimePeriod] = useState('24h');
+  const [metricType, setMetricType] = useState('all');
+  const [clients, setClients] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [sortBy, setSortBy] = useState('p99');
+  const [sortDir, setSortDir] = useState('desc');
+
+  useEffect(() => { setLoading(true); setTimeout(() => { setClients(generateDemoClientData()); setLoading(false); }, 800); }, [timePeriod]);
+  const sorted = [...clients].sort((a, b) => { if (sortBy==='name') return a.name.localeCompare(b.name)*(sortDir==='desc'?-1:1); return (a[sortBy]-b[sortBy])*(sortDir==='desc'?-1:1); });
+  const handleSort = (c) => { if (sortBy===c) setSortDir(d=>d==='desc'?'asc':'desc'); else { setSortBy(c); setSortDir('desc'); } };
+  const getLC = (ms) => ms<500?'latency-good':ms<1500?'latency-moderate':'latency-bad';
+  const getLBC = (ms) => ms<500?'var(--accent-green)':ms<1500?'var(--accent-yellow)':'var(--accent-red)';
+  const maxP99 = Math.max(...clients.map(c=>c.p99),1);
+  const stBadge = (s) => { const m={healthy:'badge-green',degraded:'badge-yellow',down:'badge-red'}; return <span className={`badge ${m[s]||'badge-green'}`}><span className="badge-dot"></span> {s}</span>; };
+
+  return (
+    <div>
+      <div className="page-header"><div className="page-title">Client Monitoring Dashboard</div><div className="page-subtitle">Monitor P50, P95, and P99 latencies across all Amelia clients</div></div>
+      <div className="page-body">
+        <div className="wip-banner"><span>WIP</span><span><strong>Work in Progress</strong> — Requires Service Account token and client URL mappings. Showing simulated data.</span></div>
+        <div className="filter-bar">
+          <div className="filter-group"><div className="input-label">Time Period</div>
+            <select className="input-field" value={timePeriod} onChange={e=>setTimePeriod(e.target.value)}>
+              <option value="1h">Last 1 Hour</option><option value="6h">Last 6 Hours</option><option value="24h">Last 24 Hours</option><option value="7d">Last 7 Days</option><option value="30d">Last 30 Days</option>
+            </select></div>
+          <div className="filter-group"><div className="input-label">Metric Focus</div>
+            <select className="input-field" value={metricType} onChange={e=>setMetricType(e.target.value)}>
+              <option value="all">All Metrics</option><option value="stt">STT</option><option value="tts">TTS</option><option value="nlu">NLU</option><option value="evg">EVG</option><option value="e2e">End-to-End</option>
+            </select></div>
+          <button className="btn-primary" onClick={()=>{setLoading(true);setTimeout(()=>{setClients(generateDemoClientData());setLoading(false);},600);}}>Refresh</button>
+        </div>
+        <div className="stats-grid">
+          <div className="stat-card"><div className="stat-label">Clients Monitored</div><div className="stat-value">{clients.length}</div><div className="stat-sub">Active instances</div></div>
+          <div className="stat-card"><div className="stat-label">Avg P50</div><div className="stat-value" style={{color:'var(--accent-green)'}}>{clients.length?Math.round(clients.reduce((s,c)=>s+c.p50,0)/clients.length):'—'}<span style={{fontSize:14,opacity:0.6}}>ms</span></div></div>
+          <div className="stat-card"><div className="stat-label">Avg P95</div><div className="stat-value" style={{color:'var(--accent-yellow)'}}>{clients.length?Math.round(clients.reduce((s,c)=>s+c.p95,0)/clients.length):'—'}<span style={{fontSize:14,opacity:0.6}}>ms</span></div></div>
+          <div className="stat-card"><div className="stat-label">Avg P99</div><div className="stat-value" style={{color:'var(--accent-red)'}}>{clients.length?Math.round(clients.reduce((s,c)=>s+c.p99,0)/clients.length):'—'}<span style={{fontSize:14,opacity:0.6}}>ms</span></div></div>
+        </div>
+        <div className="card">
+          <div className="card-header"><div className="card-title">Client Latencies — {timePeriod}</div><span style={{fontSize:12,color:'var(--text-muted)'}}>Click headers to sort</span></div>
+          <div className="card-body" style={{padding:0}}>
+            {loading ? <div style={{padding:20}}>{[1,2,3,4,5].map(i=><div className="loading-skeleton" key={i} style={{width:'100%',height:40,marginBottom:8}}></div>)}</div> :
+            <table className="client-table"><thead><tr>
+              <th style={{cursor:'pointer'}} onClick={()=>handleSort('name')}>Client {sortBy==='name'?(sortDir==='desc'?'↓':'↑'):''}</th>
+              <th>Status</th>
+              <th style={{cursor:'pointer'}} onClick={()=>handleSort('p50')}>P50 {sortBy==='p50'?(sortDir==='desc'?'↓':'↑'):''}</th>
+              <th style={{cursor:'pointer'}} onClick={()=>handleSort('p95')}>P95 {sortBy==='p95'?(sortDir==='desc'?'↓':'↑'):''}</th>
+              <th style={{cursor:'pointer'}} onClick={()=>handleSort('p99')}>P99 {sortBy==='p99'?(sortDir==='desc'?'↓':'↑'):''}</th>
+              <th>Distribution</th>
+              <th style={{cursor:'pointer'}} onClick={()=>handleSort('totalConversations')}>Conversations {sortBy==='totalConversations'?(sortDir==='desc'?'↓':'↑'):''}</th>
+            </tr></thead><tbody>
+              {sorted.map((c,i)=><tr key={i}>
+                <td><div style={{fontWeight:500}}>{c.name}</div><div style={{fontSize:11,color:'var(--text-muted)'}}>{c.url}</div></td>
+                <td>{stBadge(c.status)}</td>
+                <td className={`latency-cell ${getLC(c.p50)}`}>{c.p50}ms</td>
+                <td className={`latency-cell ${getLC(c.p95)}`}>{c.p95}ms</td>
+                <td className={`latency-cell ${getLC(c.p99)}`}>{c.p99}ms</td>
+                <td><div className="mini-bar-container">
+                  <div className="mini-bar-bg"><div className="mini-bar-fill" style={{width:`${(c.p50/maxP99)*100}%`,background:getLBC(c.p50),opacity:0.5}}></div></div>
+                  <div className="mini-bar-bg"><div className="mini-bar-fill" style={{width:`${(c.p95/maxP99)*100}%`,background:getLBC(c.p95),opacity:0.7}}></div></div>
+                  <div className="mini-bar-bg"><div className="mini-bar-fill" style={{width:`${(c.p99/maxP99)*100}%`,background:getLBC(c.p99)}}></div></div>
+                </div></td>
+                <td style={{fontVariantNumeric:'tabular-nums'}}>{c.totalConversations.toLocaleString()}</td>
+              </tr>)}
+            </tbody></table>}
+          </div>
+        </div>
+        <div className="card"><div className="card-header"><div className="card-title">Latency Trends Over Time</div></div>
+          <div className="card-body"><div className="empty-state" style={{padding:'40px 20px'}}><div className="empty-icon">&#128200;</div><div className="empty-title">Coming Soon</div><div className="empty-desc">Time-series charts will be available once Service Account and client URL mappings are configured.</div></div></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ═══════════════════════════════════════════════
+// APP
+// ═══════════════════════════════════════════════
+function App() {
+  const [page, setPage] = useState(1);
+  const [showConfig, setShowConfig] = useState(false);
+  const [config, setConfig] = useState(DEFAULT_CONFIG);
+  return (
+    <div className="app-container">
+      <div className="sidebar">
+        <div className="sidebar-logo"><div className="logo-icon">A</div><div><div className="logo-text">Amelia Latency</div><div className="logo-sub">Analyser</div></div></div>
+        <div className="sidebar-nav">
+          <div className={`nav-item ${page===1?'active':''}`} onClick={()=>setPage(1)}><span className="nav-icon">&#128269;</span><span>Troubleshoot</span></div>
+          <div className={`nav-item ${page===2?'active':''}`} onClick={()=>setPage(2)}><span className="nav-icon">&#128225;</span><span>Client Monitoring</span></div>
+        </div>
+        <div className="sidebar-config"><button className="config-btn" onClick={()=>setShowConfig(true)}><span>&#9881;</span> Settings</button></div>
+      </div>
+      <div className="main-content">{page===1?<Page1 config={config} onOpenSettings={()=>setShowConfig(true)} />:<Page2 config={config} />}</div>
+      {showConfig && <ConfigModal config={config} onSave={setConfig} onClose={()=>setShowConfig(false)} />}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
